@@ -1,0 +1,40 @@
+{
+    "Materials":
+    {
+        "glass_white":
+        {
+            "TYPE":"Glass",
+            "RGB":[0.98, 0.98, 0.98],
+            "IOR":1.5
+        },
+        "soft_glass_white":
+        {
+            "TYPE":"Glass",
+            "RGB":[0.98, 0.98, 0.98],
+            "IOR":1.5,
+            "GLASS_MODE":"Soft",
+            "FRESNEL_STRENGTH": 0.35
+        }
+    },
+    "Camera":
+    {
+        "RES":[800,800],
+        "FOVY":45.0,
+        "ITERATIONS":5000,
+        "DEPTH":1,
+        "FILE":"glass_env_isolation",
+        "EYE":[0.0,0.0,6.0],
+        "LOOKAT":[0.0,0.0,0.0],
+        "UP":[0.0,1.0,0.0]
+    },
+    "Objects":
+    [
+        {
+            "TYPE":"sphere",
+            "MATERIAL":"glass_white",
+            "TRANS":[0.0,0.0,0.0],
+            "ROTAT":[0.0,0.0,0.0],
+            "SCALE":[3.0,3.0,3.0]
+        }
+    ]
+}
