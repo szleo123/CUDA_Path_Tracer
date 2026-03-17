@@ -215,7 +215,6 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
 
         segment.ray.origin = cam.position;
         segment.color = glm::vec3(1.0f, 1.0f, 1.0f);
-        segment.mediumColor = glm::vec3(1.0f);
 
         // Stochastic sampled antialiasing: jitter the ray origin on the image plane.
         thrust::default_random_engine rng = makeSeededRandomEngine(iter, index, 0);
@@ -234,7 +233,6 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
         segment.remainingBounces = traceDepth;
         segment.lastBsdfPdf = 1.0f;
         segment.lastBounceWasDelta = 1; 
-        segment.insideRefractiveMedium = 0;
     }
 }
 
@@ -330,7 +328,6 @@ __host__ __device__ inline float powerHeuristic(float pdfA, float pdfB)
     return a2 / fmaxf(a2 + b2, EPSILON);
 }
 
-constexpr int kMaxShadowTransmissionSteps = 8;
 constexpr int kRussianRouletteStartBounce = 4;
 constexpr float kMinRussianRouletteSurvival = 0.1f;
 constexpr float kMaxRussianRouletteSurvival = 0.95f;
@@ -356,22 +353,6 @@ __device__ inline glm::vec3 offsetRayOrigin(
 {
     glm::vec3 offsetNormal = (glm::dot(direction, geometricNormal) < 0.0f) ? -geometricNormal : geometricNormal;
     return point + offsetNormal * RAY_ORIGIN_BIAS;
-}
-
-__device__ inline glm::vec3 applyTransmittance(
-    const glm::vec3& color,
-    float distance)
-{
-    glm::vec3 safeColor = glm::max(color, glm::vec3(EPSILON));
-    return glm::vec3(
-        powf(safeColor.x, distance),
-        powf(safeColor.y, distance),
-        powf(safeColor.z, distance));
-}
-
-__device__ inline bool isTransparentMaterial(const Material& material)
-{
-    return material.hasRefractive > 0.0f && material.emittance <= 0.0f;
 }
 
 __host__ __device__ inline float geomSurfaceArea(const Geom& geom)
@@ -516,25 +497,6 @@ __device__ bool findClosestHit(
     return hit.geomId >= 0;
 }
 
-__device__ bool findClosestHitOnGeom(
-    const Ray& ray,
-    float maxDistance,
-    int geomId,
-    const Geom* geoms,
-    SurfaceHit& hit)
-{
-    hit.geomId = -1;
-    hit.materialId = -1;
-    if (!intersectGeom(geoms[geomId], ray, maxDistance, hit.t, hit.point, hit.normal))
-    {
-        return false;
-    }
-
-    hit.geomId = geomId;
-    hit.materialId = geoms[geomId].materialid;
-    return true;
-}
-
 __device__ float evaluateDiffuseBsdfPdf(
     const Material& material,
     const glm::vec3& shadingNormal,
@@ -554,32 +516,11 @@ __device__ glm::vec3 computeShadowTransmittance(
     const Material* materials,
     int geoms_size)
 {
-    Ray marchRay = shadowRay;
-    float remainingDistance = maxDistance;
-    glm::vec3 transmittance(1.0f);
-
-    for (int step = 0; step < kMaxShadowTransmissionSteps && remainingDistance > EPSILON; ++step)
-    {
-        SurfaceHit hit{};
-        if (!findClosestHit(marchRay, remainingDistance, ignoreGeomId, geoms, geoms_size, hit))
-        {
-            return transmittance;
-        }
-
-        const Material& material = materials[hit.materialId];
-        if (!isTransparentMaterial(material))
-        {
-            return glm::vec3(0.0f);
-        }
-
-        // A diffuse shadow ray cannot represent the refracted specular chain
-        // needed to connect through glass to a specific sampled light point.
-        // Treat refractive blockers as unresolved specular visibility instead
-        // of marching straight through and inventing a rectangular caustic.
-        return glm::vec3(0.0f);
-    }
-
-    return transmittance;
+    (void)materials;
+    SurfaceHit hit{};
+    return findClosestHit(shadowRay, maxDistance, ignoreGeomId, geoms, geoms_size, hit)
+        ? glm::vec3(0.0f)
+        : glm::vec3(1.0f);
 }
 
 __device__ bool applyRussianRoulette(
@@ -625,10 +566,6 @@ __global__ void shadeMaterialPaths(
 
         if (intersection.t > 0.0f) {
             const Material& material = materials[intersection.materialId];
-
-            if (pathSegment.insideRefractiveMedium) {
-                pathSegment.color *= applyTransmittance(pathSegment.mediumColor, intersection.t);
-            }
 
             // If the material indicates that the object was a light, "light" the ray
             if (material.emittance > 0.0f) {
@@ -728,20 +665,6 @@ __global__ void shadeMaterialPaths(
                 pathSegment.lastBounceWasDelta = sample.isDelta;
                 pathSegment.lastBsdfPdf = sample.isDelta ? 0.0f : sample.pdf;
 
-                bool enteringRefractive = glm::dot(pathSegment.ray.direction, geometricNormal) < 0.0f;
-                if (isTransparentMaterial(material))
-                {
-                    if (sample.isTransmission)
-                    {
-                        pathSegment.insideRefractiveMedium = enteringRefractive ? 1 : 0;
-                        pathSegment.mediumColor = enteringRefractive ? material.color : glm::vec3(1.0f);
-                    }
-                    else if (sample.isDelta)
-                    {
-                        pathSegment.insideRefractiveMedium = enteringRefractive ? 0 : 1;
-                        pathSegment.mediumColor = pathSegment.insideRefractiveMedium ? material.color : glm::vec3(1.0f);
-                    }
-                }
 
                 pathSegment.ray.origin = offsetRayOrigin(intersect, geometricNormal, sample.direction);
                 pathSegment.ray.direction = sample.direction;
@@ -945,3 +868,10 @@ void pathtrace(uchar4* pbo, int frame, int iter)
 
     checkCUDAError("pathtrace");
 }
+
+
+
+
+
+
+

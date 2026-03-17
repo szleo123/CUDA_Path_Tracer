@@ -54,7 +54,6 @@ void Scene::loadFromJSON(const std::string& jsonName)
         newMaterial.specular.color = baseColor;
         newMaterial.specular.exponent = p.value("ROUGHNESS", 0.0f);
         newMaterial.indexOfRefraction = p.value("IOR", 1.5f);
-        newMaterial.fresnelStrength = p.value("FRESNEL_STRENGTH", 1.0f);
 
         const std::string matType = p["TYPE"];
 
@@ -74,18 +73,9 @@ void Scene::loadFromJSON(const std::string& jsonName)
         else if (matType == "Refractive" || matType == "Glass")
         {
             newMaterial.hasRefractive = p.value("REFRACTIVITY", 1.0f);
-            if (p.contains("GLASS_MODE"))
-            {
-                const std::string glassMode = p["GLASS_MODE"];
-                if (glassMode == "Soft" || glassMode == "soft")
-                {
-                    newMaterial.fresnelStrength = p.value("FRESNEL_STRENGTH", 0.35f);
-                }
-            }
         }
         else
         {
-            // Fallback to diffuse if type is not recognized.
             newMaterial.hasReflective = p.value("REFLECTIVITY", 0.0f);
             newMaterial.hasRefractive = p.value("REFRACTIVITY", 0.0f);
         }
@@ -135,7 +125,6 @@ void Scene::loadFromJSON(const std::string& jsonName)
     camera.lookAt = glm::vec3(lookat[0], lookat[1], lookat[2]);
     camera.up = glm::vec3(up[0], up[1], up[2]);
 
-    //calculate fov based on resolution
     float yscaled = tan(fovy * (PI / 180));
     float xscaled = (yscaled * camera.resolution.x) / camera.resolution.y;
     float fovx = (atan(xscaled) * 180) / PI;
@@ -147,7 +136,6 @@ void Scene::loadFromJSON(const std::string& jsonName)
     camera.pixelLength = glm::vec2(2 * xscaled / (float)camera.resolution.x,
         2 * yscaled / (float)camera.resolution.y);
 
-    //set up render camera stuff
     int arraylen = camera.resolution.x * camera.resolution.y;
     state.image.resize(arraylen);
     std::fill(state.image.begin(), state.image.end(), glm::vec3());

@@ -6,14 +6,6 @@
             "TYPE":"Glass",
             "RGB":[0.98, 0.98, 0.98],
             "IOR":1.5
-        },
-        "soft_glass_white":
-        {
-            "TYPE":"Glass",
-            "RGB":[0.98, 0.98, 0.98],
-            "IOR":1.5,
-            "GLASS_MODE":"Soft",
-            "FRESNEL_STRENGTH": 0.35
         }
     },
     "Camera":

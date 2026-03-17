@@ -11,7 +11,7 @@
  * Used for diffuse lighting.
  */
 __host__ __device__ glm::vec3 calculateRandomDirectionInHemisphere(
-    glm::vec3 normal, 
+    glm::vec3 normal,
     thrust::default_random_engine& rng);
 
 struct BSDFSample
@@ -21,7 +21,6 @@ struct BSDFSample
     glm::vec3 pathWeight;
     float pdf;
     int isDelta;
-    int isTransmission;
 };
 
 __host__ __device__ void computeLobeProbabilities(
@@ -51,7 +50,7 @@ __host__ __device__ void computeLobeProbabilities(
  *   branch result by that branch's probability (whatever probability you use).
  *
  * This method only samples the next event. The caller is responsible for
- * updating the path throughput, ray origin, and any medium/path state.
+ * updating the path throughput and ray origin.
  */
 __host__ __device__ void scatterRay(
     const Ray& ray,

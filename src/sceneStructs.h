@@ -44,7 +44,6 @@ struct Material
     float hasReflective;
     float hasRefractive;
     float indexOfRefraction;
-    float fresnelStrength;
     float emittance;
 };
 
@@ -73,12 +72,10 @@ struct PathSegment
 {
     Ray ray;
     glm::vec3 color;
-    glm::vec3 mediumColor;
     int pixelIndex;
     int remainingBounces;
     float lastBsdfPdf;
     int lastBounceWasDelta;
-    int insideRefractiveMedium;
 };
 
 // Use with a corresponding PathSegment to do:

@@ -18,17 +18,6 @@ __host__ __device__ inline float schlickReflectance(float cosTheta, float etaI, 
     return r0 + (1.0f - r0) * oneMinusCos5;
 }
 
-__host__ __device__ inline float evaluateDielectricReflectance(
-    float cosTheta,
-    float etaI,
-    float etaT,
-    float fresnelStrength)
-{
-    float physicalReflectance = schlickReflectance(cosTheta, etaI, etaT);
-    float strength = saturate(fresnelStrength);
-    return physicalReflectance * strength;
-}
-
 __host__ __device__ inline glm::vec3 safeDivide(const glm::vec3& value, float scalar)
 {
     return value / fmaxf(scalar, EPSILON);
@@ -62,14 +51,9 @@ __host__ __device__ glm::vec3 calculateRandomDirectionInHemisphere(
 {
     thrust::uniform_real_distribution<float> u01(0, 1);
 
-    float up = sqrt(u01(rng)); // cos(theta)
-    float over = sqrt(1 - up * up); // sin(theta)
+    float up = sqrt(u01(rng));
+    float over = sqrt(1 - up * up);
     float around = u01(rng) * TWO_PI;
-
-    // Find a direction that is not the normal based off of whether or not the
-    // normal's components are all equal to sqrt(1/3) or whether or not at
-    // least one component is less than sqrt(1/3). Learned this trick from
-    // Peter Kutz.
 
     glm::vec3 directionNotNormal;
     if (abs(normal.x) < SQRT_OF_ONE_THIRD)
@@ -85,7 +69,6 @@ __host__ __device__ glm::vec3 calculateRandomDirectionInHemisphere(
         directionNotNormal = glm::vec3(0, 0, 1);
     }
 
-    // Use not-normal direction to generate two perpendicular directions
     glm::vec3 perpendicularDirection1 =
         glm::normalize(glm::cross(normal, directionNotNormal));
     glm::vec3 perpendicularDirection2 =
@@ -119,7 +102,6 @@ __host__ __device__ void scatterRay(
         sample.pathWeight = safeDivide(m.color, pReflect);
         sample.pdf = 0.0f;
         sample.isDelta = 1;
-        sample.isTransmission = 0;
         return;
     }
 
@@ -143,24 +125,18 @@ __host__ __device__ void scatterRay(
         float sinTheta2 = fmaxf(0.0f, 1.0f - cosTheta * cosTheta);
         bool cannotRefract = (eta * eta * sinTheta2) > 1.0f;
 
-        float fresnel = evaluateDielectricReflectance(cosTheta, etaI, etaT, m.fresnelStrength);
+        float fresnel = schlickReflectance(cosTheta, etaI, etaT);
         bool chooseReflect = cannotRefract || (u01(rng) < fresnel);
         glm::vec3 outDir = chooseReflect ? glm::reflect(wi, n) : glm::refract(wi, n, eta);
         if (glm::dot(outDir, outDir) < EPSILON)
         {
             outDir = glm::reflect(wi, n);
-            chooseReflect = true;
         }
 
         sample.direction = glm::normalize(outDir);
-        // The Fresnel branch probability is baked into the event sampling.
-        // What remains here is the path weight for the chosen dielectric lobe.
-        sample.pathWeight = chooseReflect
-            ? safeDivide(glm::vec3(1.0f), pRefract)
-            : safeDivide(m.color, pRefract);
+        sample.pathWeight = safeDivide(glm::vec3(1.0f), pRefract);
         sample.pdf = 0.0f;
         sample.isDelta = 1;
-        sample.isTransmission = chooseReflect ? 0 : 1;
         return;
     }
 
@@ -169,5 +145,4 @@ __host__ __device__ void scatterRay(
     sample.pathWeight = safeDivide(m.color, pDiffuse);
     sample.pdf = pDiffuse * (cosTheta / PI);
     sample.isDelta = 0;
-    sample.isTransmission = 0;
 }
