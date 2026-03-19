@@ -253,6 +253,39 @@ int ensureTextureLoaded(
     return textureId;
 }
 
+int ensureHdrTextureLoaded(
+    const std::filesystem::path& texturePath,
+    std::unordered_map<std::string, uint32_t>& texturePathToId,
+    std::vector<TextureData>& textures,
+    std::vector<glm::vec3>& texturePixels)
+{
+    if (texturePath.empty())
+    {
+        return -1;
+    }
+
+    const std::string textureKey = std::filesystem::weakly_canonical(texturePath).string() + "|hdr";
+    auto existing = texturePathToId.find(textureKey);
+    if (existing != texturePathToId.end())
+    {
+        return static_cast<int>(existing->second);
+    }
+
+    TextureData texture{};
+    std::string error;
+    if (!loadHdrImage(texturePath, false, texture, texturePixels, error))
+    {
+        throw std::runtime_error(error);
+    }
+    texture.wrapS = 10497;
+    texture.wrapT = 33071;
+
+    const int textureId = static_cast<int>(textures.size());
+    texturePathToId[textureKey] = static_cast<uint32_t>(textureId);
+    textures.push_back(texture);
+    return textureId;
+}
+
 std::string importedMaterialKey(
     const std::filesystem::path& meshPath,
     const MeshMaterialDefinition& material)
@@ -600,6 +633,51 @@ void configureCameraFromJson(const json& cameraData, RenderState& renderState)
     renderState.image.resize(pixelCount);
     std::fill(renderState.image.begin(), renderState.image.end(), glm::vec3(0.0f));
 }
+
+void configureEnvironmentFromJson(
+    const json& data,
+    const SceneImportContext& importContext,
+    RenderState& renderState)
+{
+    EnvironmentSettings environment{};
+
+    if (data.contains("Environment"))
+    {
+        const json& environmentData = data["Environment"];
+        environment.intensity = environmentData.value("INTENSITY", 1.0f);
+        environment.rotation = environmentData.value("ROTATION", 0.0f);
+
+        if (environmentData.contains("SKY_ZENITH"))
+        {
+            environment.zenithColor = parseVec3(environmentData["SKY_ZENITH"]);
+        }
+        if (environmentData.contains("SKY_HORIZON"))
+        {
+            environment.horizonColor = parseVec3(environmentData["SKY_HORIZON"]);
+        }
+        if (environmentData.contains("GROUND_COLOR"))
+        {
+            environment.groundColor = parseVec3(environmentData["GROUND_COLOR"]);
+        }
+        if (environmentData.contains("TYPE"))
+        {
+            const std::string type = environmentData["TYPE"];
+            environment.useProceduralSky = (type != "HDR");
+        }
+        if (environmentData.contains("FILE"))
+        {
+            const std::filesystem::path hdrPath = resolveScenePath(importContext.scenePath, environmentData["FILE"]);
+            environment.textureId = ensureHdrTextureLoaded(
+                hdrPath,
+                importContext.texturePathToId,
+                importContext.textures,
+                importContext.texturePixels);
+            environment.useProceduralSky = 0;
+        }
+    }
+
+    renderState.environment = environment;
+}
 }
 
 Scene::Scene(string filename)
@@ -746,5 +824,6 @@ void Scene::loadFromJSON(const std::string& jsonName)
     rebuildStaticMeshData();
     rebuildRenderData();
     configureCameraFromJson(data["Camera"], state);
+    configureEnvironmentFromJson(data, importContext, state);
 }
 

@@ -7,8 +7,6 @@
 #include <string>
 #include <vector>
 
-#define BACKGROUND_COLOR (glm::vec3(0.0f))
-
 enum GeomType
 {
     SPHERE,
@@ -136,6 +134,17 @@ struct Camera
     glm::vec2 pixelLength;
 };
 
+struct EnvironmentSettings
+{
+    int textureId = -1;
+    int useProceduralSky = 1;
+    float intensity = 1.0f;
+    float rotation = 0.0f;
+    glm::vec3 zenithColor = glm::vec3(0.55f, 0.72f, 1.0f);
+    glm::vec3 horizonColor = glm::vec3(0.95f, 0.96f, 1.0f);
+    glm::vec3 groundColor = glm::vec3(0.30f, 0.28f, 0.26f);
+};
+
 struct RenderState
 {
     Camera camera;
@@ -143,6 +152,7 @@ struct RenderState
     int traceDepth;
     std::vector<glm::vec3> image;
     std::string imageName;
+    EnvironmentSettings environment;
 };
 
 struct PathSegment

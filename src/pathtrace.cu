@@ -924,6 +924,59 @@ __device__ inline glm::vec3 evaluateTextureOnlyColor(
     return sampleTexture(textures[material.textureId], intersection.uv, texturePixels);
 }
 
+__device__ inline glm::vec2 directionToEnvironmentUv(glm::vec3 direction, float rotationDegrees)
+{
+    direction = glm::normalize(direction);
+    const float rotationRadians = rotationDegrees * (PI / 180.0f);
+    const float cosTheta = cosf(rotationRadians);
+    const float sinTheta = sinf(rotationRadians);
+    const glm::vec3 rotatedDirection(
+        cosTheta * direction.x - sinTheta * direction.z,
+        direction.y,
+        sinTheta * direction.x + cosTheta * direction.z);
+
+    const float phi = atan2f(rotatedDirection.z, rotatedDirection.x);
+    const float theta = acosf(glm::clamp(rotatedDirection.y, -1.0f, 1.0f));
+    const float u = phi / TWO_PI + 0.5f;
+    const float v = theta / PI;
+    return glm::vec2(u, v);
+}
+
+__device__ inline glm::vec3 evaluateProceduralSky(
+    const EnvironmentSettings& environment,
+    glm::vec3 direction)
+{
+    direction = glm::normalize(direction);
+    const float upness = glm::clamp(direction.y * 0.5f + 0.5f, 0.0f, 1.0f);
+    const float horizonBlend = 1.0f - fabsf(direction.y);
+
+    glm::vec3 skyColor = glm::mix(environment.horizonColor, environment.zenithColor, upness);
+    skyColor = glm::mix(skyColor, environment.horizonColor, horizonBlend * horizonBlend * 0.35f);
+    const glm::vec3 groundBlend = glm::mix(environment.groundColor, environment.horizonColor, upness);
+
+    return direction.y >= 0.0f ? skyColor : groundBlend;
+}
+
+__device__ inline glm::vec3 sampleEnvironment(
+    const EnvironmentSettings& environment,
+    glm::vec3 direction,
+    const TextureData* textures,
+    const glm::vec3* texturePixels)
+{
+    glm::vec3 radiance(0.0f);
+    if (!environment.useProceduralSky && environment.textureId >= 0)
+    {
+        const glm::vec2 uv = directionToEnvironmentUv(direction, environment.rotation);
+        radiance = sampleTexture(textures[environment.textureId], uv, texturePixels);
+    }
+    else
+    {
+        radiance = evaluateProceduralSky(environment, direction);
+    }
+
+    return radiance * environment.intensity;
+}
+
 __device__ inline glm::vec3 evaluateMeshUvCheckerColor(const glm::vec2& uv)
 {
     const glm::vec2 wrapped = glm::vec2(
@@ -1179,6 +1232,7 @@ __global__ void shadeMaterialPaths(
     int triangleBvhNodeCount,
     const TextureData* textures,
     const glm::vec3* texturePixels,
+    EnvironmentSettings environment,
     const int* lightGeomIndices,
     const float* geomLightSelectionPmf,
     int lightGeomCount,
@@ -1352,7 +1406,7 @@ __global__ void shadeMaterialPaths(
             }
         }
         else {
-            pathSegment.color *= BACKGROUND_COLOR;
+            pathSegment.color *= sampleEnvironment(environment, pathSegment.ray.direction, textures, texturePixels);
             image[pathSegment.pixelIndex] += pathSegment.color;
             pathSegment.remainingBounces = 0;
         }
@@ -1494,6 +1548,7 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             triangleBvhNodeCount,
             dev_textures,
             dev_texturePixels,
+            hst_scene->state.environment,
             dev_lightGeomIndices,
             dev_geomLightSelectionPmf,
             hst_lightGeomCount,

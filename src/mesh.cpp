@@ -907,6 +907,44 @@ bool loadTextureImageFromMemory(
     return true;
 }
 
+bool loadHdrImage(
+    const std::filesystem::path& texturePath,
+    bool flipV,
+    TextureData& outTexture,
+    std::vector<glm::vec3>& outPixels,
+    std::string& outError)
+{
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    float* data = stbi_loadf(texturePath.string().c_str(), &width, &height, &channels, 3);
+    if (!data)
+    {
+        outError = "Failed to load HDR image: " + texturePath.string();
+        return false;
+    }
+
+    outTexture.width = width;
+    outTexture.height = height;
+    outTexture.pixelOffset = static_cast<int>(outPixels.size());
+    outTexture.flipV = flipV ? 1 : 0;
+    outTexture.wrapS = kWrapRepeat;
+    outTexture.wrapT = kWrapClampToEdge;
+    outPixels.reserve(outPixels.size() + width * height);
+
+    for (int i = 0; i < width * height; ++i)
+    {
+        const int base = i * 3;
+        outPixels.emplace_back(
+            glm::max(data[base + 0], 0.0f),
+            glm::max(data[base + 1], 0.0f),
+            glm::max(data[base + 2], 0.0f));
+    }
+
+    stbi_image_free(data);
+    return true;
+}
+
 bool loadMeshAsset(
     const std::filesystem::path& meshPath,
     int materialId,

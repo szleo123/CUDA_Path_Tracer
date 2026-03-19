@@ -1,4 +1,11 @@
 {
+    "Environment":
+    {
+        "TYPE": "HDR",
+        "FILE": "../assets/hdrs/grasslands_sunset_4k.hdr",
+        "INTENSITY": 1.0,
+        "ROTATION": 0.0
+    }, 
     "Materials":  {
                       "light":  {
                                     "TYPE":  "Emitting",

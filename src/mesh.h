@@ -34,6 +34,13 @@ bool loadTextureImageFromMemory(
     std::vector<glm::vec3>& outPixels,
     std::string& outError);
 
+bool loadHdrImage(
+    const std::filesystem::path& texturePath,
+    bool flipV,
+    TextureData& outTexture,
+    std::vector<glm::vec3>& outPixels,
+    std::string& outError);
+
 bool loadMeshAsset(
     const std::filesystem::path& meshPath,
     int materialId,
