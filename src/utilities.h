@@ -17,6 +17,12 @@
 #define MIN_INTERSECTION_T 0.0001f
 #define RAY_ORIGIN_BIAS   0.001f
 
+#ifdef __CUDACC__
+#define CUDA_INLINE __host__ __device__ inline
+#else
+#define CUDA_INLINE inline
+#endif
+
 enum RenderDebugMode
 {
     RENDER_DEBUG_NONE = 0,
@@ -24,6 +30,54 @@ enum RenderDebugMode
     RENDER_DEBUG_MESH_BASE_COLOR = 2,
     RENDER_DEBUG_MESH_TEXTURE_ONLY = 3
 };
+
+enum ToneMapMode
+{
+    TONEMAP_NONE = 0,
+    TONEMAP_REINHARD = 1,
+    TONEMAP_ACES = 2
+};
+
+CUDA_INLINE float saturatef(float value)
+{
+    return value < 0.0f ? 0.0f : (value > 1.0f ? 1.0f : value);
+}
+
+CUDA_INLINE glm::vec3 applyToneMapping(glm::vec3 color, int toneMapMode)
+{
+    if (toneMapMode == TONEMAP_REINHARD)
+    {
+        return color / (glm::vec3(1.0f) + color);
+    }
+
+    if (toneMapMode == TONEMAP_ACES)
+    {
+        const float a = 2.51f;
+        const float b = 0.03f;
+        const float c = 2.43f;
+        const float d = 0.59f;
+        const float e = 0.14f;
+        glm::vec3 mapped = (color * (a * color + glm::vec3(b)))
+            / (color * (c * color + glm::vec3(d)) + glm::vec3(e));
+        return glm::clamp(mapped, glm::vec3(0.0f), glm::vec3(1.0f));
+    }
+
+    return color;
+}
+
+CUDA_INLINE glm::vec3 applyDisplayTransform(glm::vec3 color, float exposureValue, int toneMapMode)
+{
+    const float exposureScale = powf(2.0f, exposureValue);
+    color *= exposureScale;
+    color = applyToneMapping(color, toneMapMode);
+    color = glm::max(color, glm::vec3(0.0f));
+
+    const float invGamma = 1.0f / 2.2f;
+    return glm::vec3(
+        powf(saturatef(color.x), invGamma),
+        powf(saturatef(color.y), invGamma),
+        powf(saturatef(color.z), invGamma));
+}
 
 class GuiDataContainer
 {
@@ -37,6 +91,8 @@ public:
         , LastSortTimeMs(0.0f)
         , LastShadeTimeMs(0.0f)
         , LastNumShadedPaths(0)
+        , ExposureValue(0.0f)
+        , ToneMapModeValue(TONEMAP_REINHARD)
         , RenderDebugModeValue(RENDER_DEBUG_NONE)
     {}
     int TracedDepth;
@@ -47,6 +103,8 @@ public:
     float LastSortTimeMs;
     float LastShadeTimeMs;
     int LastNumShadedPaths;
+    float ExposureValue;
+    int ToneMapModeValue;
     int RenderDebugModeValue;
 };
 

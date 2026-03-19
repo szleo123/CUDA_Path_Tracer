@@ -77,7 +77,13 @@ thrust::default_random_engine makeSeededRandomEngine(int iter, int index, int de
 }
 
 //Kernel that writes the image to the OpenGL PBO directly.
-__global__ void sendImageToPBO(uchar4* pbo, glm::ivec2 resolution, int iter, glm::vec3* image)
+__global__ void sendImageToPBO(
+    uchar4* pbo,
+    glm::ivec2 resolution,
+    int iter,
+    glm::vec3* image,
+    float exposureValue,
+    int toneMapMode)
 {
     int x = (blockIdx.x * blockDim.x) + threadIdx.x;
     int y = (blockIdx.y * blockDim.y) + threadIdx.y;
@@ -85,12 +91,13 @@ __global__ void sendImageToPBO(uchar4* pbo, glm::ivec2 resolution, int iter, glm
     if (x < resolution.x && y < resolution.y)
     {
         int index = x + (y * resolution.x);
-        glm::vec3 pix = image[index];
+        glm::vec3 pix = image[index] / static_cast<float>(iter);
+        pix = applyDisplayTransform(pix, exposureValue, toneMapMode);
 
         glm::ivec3 color;
-        color.x = glm::clamp((int)(pix.x / iter * 255.0), 0, 255);
-        color.y = glm::clamp((int)(pix.y / iter * 255.0), 0, 255);
-        color.z = glm::clamp((int)(pix.z / iter * 255.0), 0, 255);
+        color.x = glm::clamp(static_cast<int>(pix.x * 255.0f), 0, 255);
+        color.y = glm::clamp(static_cast<int>(pix.y * 255.0f), 0, 255);
+        color.z = glm::clamp(static_cast<int>(pix.z * 255.0f), 0, 255);
 
         // Each thread writes one pixel location in the texture (textel)
         pbo[index].w = 0;
@@ -1383,7 +1390,15 @@ void pathtrace(uchar4* pbo, int frame, int iter)
     ///////////////////////////////////////////////////////////////////////////
 
     // Send results to OpenGL buffer for rendering
-    sendImageToPBO<<<blocksPerGrid2d, blockSize2d>>>(pbo, cam.resolution, iter, dev_image);
+    const float exposureValue = (guiData != NULL) ? guiData->ExposureValue : 0.0f;
+    const int toneMapMode = (guiData != NULL) ? guiData->ToneMapModeValue : TONEMAP_REINHARD;
+    sendImageToPBO<<<blocksPerGrid2d, blockSize2d>>>(
+        pbo,
+        cam.resolution,
+        iter,
+        dev_image,
+        exposureValue,
+        toneMapMode);
 
     // Retrieve image from GPU
     checkCUDAResult(

@@ -106,6 +106,19 @@ const char* getRenderDebugModeLabel(int mode)
     }
 }
 
+const char* getToneMapModeLabel(int mode)
+{
+    switch (mode)
+    {
+    case TONEMAP_NONE:
+        return "None";
+    case TONEMAP_ACES:
+        return "ACES";
+    default:
+        return "Reinhard";
+    }
+}
+
 const char* getTransformModeLabel(TransformMode mode)
 {
     switch (mode)
@@ -174,6 +187,16 @@ void renderAnalyticsWindow()
         iteration = 0;
     }
 
+    const char* toneMapLabels[] = { "None", "Reinhard", "ACES" };
+    if (ImGui::Combo("Tone Mapping", &imguiData->ToneMapModeValue, toneMapLabels, IM_ARRAYSIZE(toneMapLabels)))
+    {
+        iteration = 0;
+    }
+    if (ImGui::SliderFloat("Exposure", &imguiData->ExposureValue, -5.0f, 5.0f, "%.2f EV"))
+    {
+        iteration = 0;
+    }
+
     const char* renderDebugLabels[] = { "None", "Mesh UV Checker", "Mesh Base Color", "Mesh Texture Only" };
     if (ImGui::Combo("Render Debug", &imguiData->RenderDebugModeValue, renderDebugLabels, IM_ARRAYSIZE(renderDebugLabels)))
     {
@@ -196,6 +219,8 @@ void renderAnalyticsWindow()
         }
     }
 
+    ImGui::Text("Tone Mapping %s", getToneMapModeLabel(imguiData->ToneMapModeValue));
+    ImGui::Text("Exposure %.2f EV", imguiData->ExposureValue);
     ImGui::Text("Render Debug %s", getRenderDebugModeLabel(imguiData->RenderDebugModeValue));
     ImGui::Text("Traced Depth %d", imguiData->TracedDepth);
     ImGui::Text("Last Sort Time %.3f ms", imguiData->LastSortTimeMs);
@@ -1094,7 +1119,7 @@ int main(int argc, char** argv)
 
 void saveImage()
 {
-    float samples = iteration;
+    const float samples = static_cast<float>(glm::max(iteration, 1));
     // output image file
     Image img(width, height);
 
@@ -1103,8 +1128,9 @@ void saveImage()
         for (int y = 0; y < height; y++)
         {
             int index = x + (y * width);
-            glm::vec3 pix = renderState->image[index];
-            img.setPixel(width - 1 - x, y, glm::vec3(pix) / samples);
+            glm::vec3 pix = renderState->image[index] / samples;
+            pix = applyDisplayTransform(pix, imguiData->ExposureValue, imguiData->ToneMapModeValue);
+            img.setPixel(width - 1 - x, y, pix);
         }
     }
 
