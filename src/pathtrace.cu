@@ -105,11 +105,86 @@ static GuiDataContainer* guiData = NULL;
 static glm::vec3* dev_image = NULL;
 static Geom* dev_geoms = NULL;
 static Material* dev_materials = NULL;
+static Triangle* dev_triangles = NULL;
+static TriangleBvhNode* dev_triangleBvhNodes = NULL;
+static MeshInstance* dev_meshInstances = NULL;
+static ScenePrimitive* dev_scenePrimitives = NULL;
+static SceneBvhNode* dev_sceneBvhNodes = NULL;
+static TextureData* dev_textures = NULL;
+static glm::vec3* dev_texturePixels = NULL;
 static PathSegment* dev_paths = NULL;
 static ShadeableIntersection* dev_intersections = NULL;
 static int* dev_materialSortKeys = NULL;
 static int* dev_lightGeomIndices = NULL;
 static int hst_lightGeomCount = 0;
+static size_t dev_geomsCount = 0;
+static size_t dev_materialsCount = 0;
+static size_t dev_trianglesCount = 0;
+static size_t dev_triangleBvhNodeCount = 0;
+static size_t dev_meshInstanceCount = 0;
+static size_t dev_scenePrimitiveCount = 0;
+static size_t dev_sceneBvhNodeCount = 0;
+static size_t dev_textureCount = 0;
+static size_t dev_texturePixelCount = 0;
+
+template <typename T>
+void uploadVectorToDevice(T*& devicePtr, size_t& deviceCount, const std::vector<T>& hostData)
+{
+    if (hostData.empty())
+    {
+        if (devicePtr != nullptr)
+        {
+            checkCUDAResult(cudaFree(devicePtr), "free empty device buffer");
+            devicePtr = nullptr;
+        }
+        deviceCount = 0;
+        return;
+    }
+
+    if (deviceCount != hostData.size())
+    {
+        if (devicePtr != nullptr)
+        {
+            checkCUDAResult(cudaFree(devicePtr), "resize device buffer");
+            devicePtr = nullptr;
+        }
+        checkCUDAResult(cudaMalloc(&devicePtr, hostData.size() * sizeof(T)), "allocate device buffer");
+        deviceCount = hostData.size();
+    }
+
+    checkCUDAResult(
+        cudaMemcpy(devicePtr, hostData.data(), hostData.size() * sizeof(T), cudaMemcpyHostToDevice),
+        "upload device buffer");
+}
+
+void uploadLightGeomIndices(const Scene* scene)
+{
+    std::vector<int> lightGeomIndices;
+    lightGeomIndices.reserve(scene->geoms.size());
+    for (int i = 0; i < static_cast<int>(scene->geoms.size()); ++i)
+    {
+        const Geom& g = scene->geoms[i];
+        if (scene->materials[g.materialid].emittance > 0.0f)
+        {
+            lightGeomIndices.push_back(i);
+        }
+    }
+
+    if (dev_lightGeomIndices != nullptr)
+    {
+        checkCUDAResult(cudaFree(dev_lightGeomIndices), "free light geom indices");
+        dev_lightGeomIndices = nullptr;
+    }
+
+    hst_lightGeomCount = static_cast<int>(lightGeomIndices.size());
+    if (hst_lightGeomCount > 0)
+    {
+        checkCUDAResult(cudaMalloc(&dev_lightGeomIndices, hst_lightGeomCount * sizeof(int)), "allocate light geom indices");
+        checkCUDAResult(
+            cudaMemcpy(dev_lightGeomIndices, lightGeomIndices.data(), hst_lightGeomCount * sizeof(int), cudaMemcpyHostToDevice),
+            "upload light geom indices");
+    }
+}
 
 struct PathTerminated
 {
@@ -136,43 +211,47 @@ void pathtraceInit(Scene* scene)
 
     cudaMalloc(&dev_paths, pixelcount * sizeof(PathSegment));
 
-    cudaMalloc(&dev_geoms, scene->geoms.size() * sizeof(Geom));
-    cudaMemcpy(dev_geoms, scene->geoms.data(), scene->geoms.size() * sizeof(Geom), cudaMemcpyHostToDevice);
-
-    cudaMalloc(&dev_materials, scene->materials.size() * sizeof(Material));
-    cudaMemcpy(dev_materials, scene->materials.data(), scene->materials.size() * sizeof(Material), cudaMemcpyHostToDevice);
+    uploadVectorToDevice(dev_geoms, dev_geomsCount, scene->geoms);
+    uploadVectorToDevice(dev_materials, dev_materialsCount, scene->materials);
+    uploadVectorToDevice(dev_triangles, dev_trianglesCount, scene->triangles);
+    uploadVectorToDevice(dev_triangleBvhNodes, dev_triangleBvhNodeCount, scene->triangleBvhNodes);
+    uploadVectorToDevice(dev_meshInstances, dev_meshInstanceCount, scene->meshInstances);
+    uploadVectorToDevice(dev_scenePrimitives, dev_scenePrimitiveCount, scene->scenePrimitives);
+    uploadVectorToDevice(dev_sceneBvhNodes, dev_sceneBvhNodeCount, scene->sceneBvhNodes);
+    uploadVectorToDevice(dev_textures, dev_textureCount, scene->textures);
+    uploadVectorToDevice(dev_texturePixels, dev_texturePixelCount, scene->texturePixels);
 
     cudaMalloc(&dev_intersections, pixelcount * sizeof(ShadeableIntersection));
     cudaMalloc(&dev_materialSortKeys, pixelcount * sizeof(int));
-
-    std::vector<int> lightGeomIndices;
-    lightGeomIndices.reserve(scene->geoms.size());
-    for (int i = 0; i < static_cast<int>(scene->geoms.size()); ++i)
-    {
-        const Geom& g = scene->geoms[i];
-        if (scene->materials[g.materialid].emittance > 0.0f)
-        {
-            lightGeomIndices.push_back(i);
-        }
-    }
-
-    hst_lightGeomCount = static_cast<int>(lightGeomIndices.size());
-    if (hst_lightGeomCount > 0)
-    {
-        cudaMalloc(&dev_lightGeomIndices, hst_lightGeomCount * sizeof(int));
-        cudaMemcpy(
-            dev_lightGeomIndices,
-            lightGeomIndices.data(),
-            hst_lightGeomCount * sizeof(int),
-            cudaMemcpyHostToDevice
-        );
-    }
-    else
-    {
-        dev_lightGeomIndices = nullptr;
-    }
+    uploadLightGeomIndices(scene);
+    scene->gpuDynamicDataDirty = false;
 
     checkCUDAError("pathtraceInit");
+}
+
+void pathtraceUpdateScene(Scene* scene)
+{
+    hst_scene = scene;
+    uploadVectorToDevice(dev_geoms, dev_geomsCount, scene->geoms);
+    uploadVectorToDevice(dev_meshInstances, dev_meshInstanceCount, scene->meshInstances);
+    uploadVectorToDevice(dev_scenePrimitives, dev_scenePrimitiveCount, scene->scenePrimitives);
+    uploadVectorToDevice(dev_sceneBvhNodes, dev_sceneBvhNodeCount, scene->sceneBvhNodes);
+    uploadLightGeomIndices(scene);
+    scene->gpuDynamicDataDirty = false;
+    checkCUDAError("pathtraceUpdateScene");
+}
+
+void pathtraceResetAccumulation()
+{
+    if (hst_scene == nullptr || dev_image == nullptr)
+    {
+        return;
+    }
+
+    const Camera& cam = hst_scene->state.camera;
+    const size_t pixelcount = static_cast<size_t>(cam.resolution.x) * static_cast<size_t>(cam.resolution.y);
+    checkCUDAResult(cudaMemset(dev_image, 0, pixelcount * sizeof(glm::vec3)), "reset accumulation");
+    checkCUDAError("pathtraceResetAccumulation");
 }
 
 void pathtraceFree()
@@ -181,6 +260,13 @@ void pathtraceFree()
     cudaFree(dev_paths);
     cudaFree(dev_geoms);
     cudaFree(dev_materials);
+    cudaFree(dev_triangles);
+    cudaFree(dev_triangleBvhNodes);
+    cudaFree(dev_meshInstances);
+    cudaFree(dev_scenePrimitives);
+    cudaFree(dev_sceneBvhNodes);
+    cudaFree(dev_textures);
+    cudaFree(dev_texturePixels);
     cudaFree(dev_intersections);
     cudaFree(dev_materialSortKeys);
     cudaFree(dev_lightGeomIndices);
@@ -188,11 +274,26 @@ void pathtraceFree()
     dev_paths = nullptr;
     dev_geoms = nullptr;
     dev_materials = nullptr;
+    dev_triangles = nullptr;
+    dev_triangleBvhNodes = nullptr;
+    dev_meshInstances = nullptr;
+    dev_scenePrimitives = nullptr;
+    dev_sceneBvhNodes = nullptr;
+    dev_textures = nullptr;
+    dev_texturePixels = nullptr;
     dev_intersections = nullptr;
-    dev_materialSortKeys = nullptr; 
+    dev_materialSortKeys = nullptr;
     dev_lightGeomIndices = nullptr;
     hst_lightGeomCount = 0;
-
+    dev_geomsCount = 0;
+    dev_materialsCount = 0;
+    dev_trianglesCount = 0;
+    dev_triangleBvhNodeCount = 0;
+    dev_meshInstanceCount = 0;
+    dev_scenePrimitiveCount = 0;
+    dev_sceneBvhNodeCount = 0;
+    dev_textureCount = 0;
+    dev_texturePixelCount = 0;
     checkCUDAError("pathtraceFree");
 }
 
@@ -236,11 +337,338 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
     }
 }
 
+constexpr int kMaxBvhStackSize = 64;
+
+struct TraceHit
+{
+    float t;
+    glm::vec3 point;
+    glm::vec3 shadingNormal;
+    glm::vec3 geometricNormal;
+    glm::vec2 uv;
+    int geomId;
+    int materialId;
+};
+
+__device__ inline bool intersectAabb(
+    const Ray& ray,
+    const glm::vec3& bboxMin,
+    const glm::vec3& bboxMax,
+    float tMax,
+    float& tEntry)
+{
+    float tMin = 0.0f;
+    float tFar = tMax;
+
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        const float origin = ray.origin[axis];
+        const float direction = ray.direction[axis];
+        if (fabsf(direction) < EPSILON)
+        {
+            if (origin < bboxMin[axis] || origin > bboxMax[axis])
+            {
+                return false;
+            }
+            continue;
+        }
+
+        const float invDir = 1.0f / direction;
+        float t0 = (bboxMin[axis] - origin) * invDir;
+        float t1 = (bboxMax[axis] - origin) * invDir;
+        if (t0 > t1)
+        {
+            const float temp = t0;
+            t0 = t1;
+            t1 = temp;
+        }
+
+        tMin = fmaxf(tMin, t0);
+        tFar = fminf(tFar, t1);
+        if (tMin > tFar)
+        {
+            return false;
+        }
+    }
+
+    tEntry = tMin;
+    return true;
+}
+
+__device__ inline Ray transformRay(const Ray& ray, const glm::mat4& transform)
+{
+    Ray transformedRay;
+    transformedRay.origin = multiplyMV(transform, glm::vec4(ray.origin, 1.0f));
+    transformedRay.direction = glm::normalize(multiplyMV(transform, glm::vec4(ray.direction, 0.0f)));
+    return transformedRay;
+}
+
+__device__ inline void transformTraceHit(
+    const MeshInstance& meshInstance,
+    const Ray& worldRay,
+    TraceHit& hit)
+{
+    hit.point = multiplyMV(meshInstance.transform, glm::vec4(hit.point, 1.0f));
+    hit.shadingNormal = glm::normalize(multiplyMV(meshInstance.invTranspose, glm::vec4(hit.shadingNormal, 0.0f)));
+    hit.geometricNormal = glm::normalize(multiplyMV(meshInstance.invTranspose, glm::vec4(hit.geometricNormal, 0.0f)));
+    if (glm::dot(hit.shadingNormal, hit.geometricNormal) < 0.0f)
+    {
+        hit.shadingNormal = -hit.shadingNormal;
+    }
+    hit.t = glm::length(hit.point - worldRay.origin);
+}
+
+__device__ bool traverseTriangleBvhClosest(
+    const Ray& ray,
+    const Triangle* triangles,
+    const TriangleBvhNode* nodes,
+    int nodeCount,
+    int rootNodeIndex,
+    float maxDistance,
+    TraceHit& outHit)
+{
+    if (triangles == nullptr || nodes == nullptr || nodeCount <= 0 || rootNodeIndex < 0 || rootNodeIndex >= nodeCount)
+    {
+        return false;
+    }
+
+    int stack[kMaxBvhStackSize];
+    int stackSize = 0;
+    stack[stackSize++] = rootNodeIndex;
+    bool hit = false;
+    outHit.t = maxDistance;
+
+    while (stackSize > 0)
+    {
+        const TriangleBvhNode& node = nodes[stack[--stackSize]];
+        float nodeEntry = 0.0f;
+        if (!intersectAabb(ray, node.bboxMin, node.bboxMax, outHit.t, nodeEntry))
+        {
+            continue;
+        }
+
+        if (node.triCount > 0)
+        {
+            for (int i = 0; i < node.triCount; ++i)
+            {
+                const Triangle& triangle = triangles[node.leftFirst + i];
+                glm::vec3 trianglePoint;
+                glm::vec3 shadingNormal;
+                glm::vec3 geometricNormal;
+                glm::vec2 uv;
+                const float t = triangleIntersectionTest(triangle, ray, trianglePoint, shadingNormal, geometricNormal, uv);
+                if (t > MIN_INTERSECTION_T && t < outHit.t)
+                {
+                    outHit.t = t;
+                    outHit.point = trianglePoint;
+                    outHit.shadingNormal = shadingNormal;
+                    outHit.geometricNormal = geometricNormal;
+                    outHit.uv = uv;
+                    outHit.geomId = -1;
+                    outHit.materialId = triangle.materialId;
+                    hit = true;
+                }
+            }
+            continue;
+        }
+
+        const int leftChild = node.leftFirst;
+        const int rightChild = node.rightChild;
+        float leftEntry = 0.0f;
+        float rightEntry = 0.0f;
+        const bool hitLeft = intersectAabb(ray, nodes[leftChild].bboxMin, nodes[leftChild].bboxMax, outHit.t, leftEntry);
+        const bool hitRight = intersectAabb(ray, nodes[rightChild].bboxMin, nodes[rightChild].bboxMax, outHit.t, rightEntry);
+
+        if (hitLeft && hitRight)
+        {
+            const bool leftFirst = leftEntry < rightEntry;
+            if (stackSize + 2 <= kMaxBvhStackSize)
+            {
+                stack[stackSize++] = leftFirst ? rightChild : leftChild;
+                stack[stackSize++] = leftFirst ? leftChild : rightChild;
+            }
+        }
+        else if (hitLeft)
+        {
+            if (stackSize + 1 <= kMaxBvhStackSize)
+            {
+                stack[stackSize++] = leftChild;
+            }
+        }
+        else if (hitRight)
+        {
+            if (stackSize + 1 <= kMaxBvhStackSize)
+            {
+                stack[stackSize++] = rightChild;
+            }
+        }
+    }
+
+    return hit;
+}
+
+__device__ bool intersectGeomDetailed(
+    const Geom& geom,
+    int geomIndex,
+    const Ray& ray,
+    float maxDistance,
+    TraceHit& outHit)
+{
+    glm::vec3 point(0.0f);
+    glm::vec3 normal(0.0f);
+    bool outside = false;
+    float hitT = -1.0f;
+
+    if (geom.type == CUBE)
+    {
+        hitT = boxIntersectionTest(geom, ray, point, normal, outside);
+    }
+    else
+    {
+        hitT = sphereIntersectionTest(geom, ray, point, normal, outside);
+    }
+
+    if (hitT > MIN_INTERSECTION_T && hitT < maxDistance)
+    {
+        outHit.t = hitT;
+        outHit.point = point;
+        outHit.shadingNormal = normal;
+        outHit.geometricNormal = normal;
+        outHit.uv = glm::vec2(0.0f);
+        outHit.geomId = geomIndex;
+        outHit.materialId = geom.materialid;
+        return true;
+    }
+
+    return false;
+}
+
+__device__ bool traceSceneClosest(
+    const Ray& ray,
+    float maxDistance,
+    int ignoreGeomId,
+    const Geom* geoms,
+    const MeshInstance* meshInstances,
+    const ScenePrimitive* scenePrimitives,
+    const SceneBvhNode* sceneBvhNodes,
+    int sceneBvhNodeCount,
+    const Triangle* triangles,
+    const TriangleBvhNode* triangleBvhNodes,
+    int triangleBvhNodeCount,
+    TraceHit& outHit)
+{
+    outHit.t = maxDistance;
+    outHit.geomId = -1;
+    outHit.materialId = -1;
+    outHit.uv = glm::vec2(0.0f);
+
+    if (scenePrimitives == nullptr || sceneBvhNodes == nullptr || sceneBvhNodeCount <= 0)
+    {
+        return false;
+    }
+
+    int stack[kMaxBvhStackSize];
+    int stackSize = 0;
+    stack[stackSize++] = 0;
+
+    while (stackSize > 0)
+    {
+        const SceneBvhNode& node = sceneBvhNodes[stack[--stackSize]];
+        float nodeEntry = 0.0f;
+        if (!intersectAabb(ray, node.bboxMin, node.bboxMax, outHit.t, nodeEntry))
+        {
+            continue;
+        }
+
+        if (node.primitiveCount > 0)
+        {
+            for (int i = 0; i < node.primitiveCount; ++i)
+            {
+                const ScenePrimitive& primitive = scenePrimitives[node.leftFirst + i];
+                if (primitive.type == SCENE_PRIMITIVE_GEOM)
+                {
+                    if (primitive.index == ignoreGeomId)
+                    {
+                        continue;
+                    }
+
+                    TraceHit candidate{};
+                    if (intersectGeomDetailed(geoms[primitive.index], primitive.index, ray, outHit.t, candidate))
+                    {
+                        outHit = candidate;
+                    }
+                }
+                else if (primitive.type == SCENE_PRIMITIVE_MESH_INSTANCE)
+                {
+                    const MeshInstance& meshInstance = meshInstances[primitive.index];
+                    TraceHit candidate{};
+                    const Ray localRay = transformRay(ray, meshInstance.inverseTransform);
+                    if (traverseTriangleBvhClosest(
+                        localRay,
+                        triangles,
+                        triangleBvhNodes,
+                        triangleBvhNodeCount,
+                        meshInstance.bvhRootIndex,
+                        FLT_MAX,
+                        candidate))
+                    {
+                        transformTraceHit(meshInstance, ray, candidate);
+                        if (candidate.t > MIN_INTERSECTION_T && candidate.t < outHit.t)
+                        {
+                            outHit = candidate;
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+
+        const int leftChild = node.leftFirst;
+        const int rightChild = node.rightChild;
+        float leftEntry = 0.0f;
+        float rightEntry = 0.0f;
+        const bool hitLeft = intersectAabb(ray, sceneBvhNodes[leftChild].bboxMin, sceneBvhNodes[leftChild].bboxMax, outHit.t, leftEntry);
+        const bool hitRight = intersectAabb(ray, sceneBvhNodes[rightChild].bboxMin, sceneBvhNodes[rightChild].bboxMax, outHit.t, rightEntry);
+
+        if (hitLeft && hitRight)
+        {
+            const bool leftFirst = leftEntry < rightEntry;
+            if (stackSize + 2 <= kMaxBvhStackSize)
+            {
+                stack[stackSize++] = leftFirst ? rightChild : leftChild;
+                stack[stackSize++] = leftFirst ? leftChild : rightChild;
+            }
+        }
+        else if (hitLeft)
+        {
+            if (stackSize + 1 <= kMaxBvhStackSize)
+            {
+                stack[stackSize++] = leftChild;
+            }
+        }
+        else if (hitRight)
+        {
+            if (stackSize + 1 <= kMaxBvhStackSize)
+            {
+                stack[stackSize++] = rightChild;
+            }
+        }
+    }
+
+    return outHit.materialId >= 0;
+}
+
 __global__ void computeIntersections(
     int num_paths,
     PathSegment* pathSegments,
     const Geom* geoms,
-    int geoms_size,
+    const MeshInstance* meshInstances,
+    const ScenePrimitive* scenePrimitives,
+    const SceneBvhNode* sceneBvhNodes,
+    int sceneBvhNodeCount,
+    const Triangle* triangles,
+    const TriangleBvhNode* triangleBvhNodes,
+    int triangleBvhNodeCount,
     ShadeableIntersection* intersections)
 {
     int path_index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -253,61 +681,41 @@ __global__ void computeIntersections(
             intersections[path_index].t = -1.0f;
             intersections[path_index].materialId = -1;
             intersections[path_index].geomId = -1;
+            intersections[path_index].uv = glm::vec2(0.0f);
             return;
         }
 
-        float t;
-        glm::vec3 intersect_point;
-        glm::vec3 normal;
-        float t_min = FLT_MAX;
-        int hit_geom_index = -1;
-        bool outside = true;
-
-        glm::vec3 tmp_intersect;
-        glm::vec3 tmp_normal;
-
-        // naive parse through global geoms
-
-        for (int i = 0; i < geoms_size; i++)
-        {
-            const Geom& geom = geoms[i];
-
-            if (geom.type == CUBE)
-            {
-                t = boxIntersectionTest(geom, pathSegment.ray, tmp_intersect, tmp_normal, outside);
-            }
-            else if (geom.type == SPHERE)
-            {
-                t = sphereIntersectionTest(geom, pathSegment.ray, tmp_intersect, tmp_normal, outside);
-            }
-            // Compute the minimum t from the intersection tests to determine what
-            // scene geometry object was hit first.
-            if (t > MIN_INTERSECTION_T && t_min > t)
-            {
-                t_min = t;
-                hit_geom_index = i;
-                intersect_point = tmp_intersect;
-                normal = tmp_normal;
-            }
-        }
-
-        if (hit_geom_index == -1)
+        TraceHit hit{};
+        if (!traceSceneClosest(
+            pathSegment.ray,
+            FLT_MAX,
+            -1,
+            geoms,
+            meshInstances,
+            scenePrimitives,
+            sceneBvhNodes,
+            sceneBvhNodeCount,
+            triangles,
+            triangleBvhNodes,
+            triangleBvhNodeCount,
+            hit))
         {
             intersections[path_index].t = -1.0f;
             intersections[path_index].materialId = -1;
             intersections[path_index].geomId = -1;
+            intersections[path_index].uv = glm::vec2(0.0f);
         }
         else
         {
-            // The ray hits something
-            intersections[path_index].t = t_min;
-            intersections[path_index].materialId = geoms[hit_geom_index].materialid;
-            intersections[path_index].surfaceNormal = normal;
-            intersections[path_index].geomId = hit_geom_index;
+            intersections[path_index].t = hit.t;
+            intersections[path_index].materialId = hit.materialId;
+            intersections[path_index].surfaceNormal = hit.shadingNormal;
+            intersections[path_index].geometricNormal = hit.geometricNormal;
+            intersections[path_index].uv = hit.uv;
+            intersections[path_index].geomId = hit.geomId;
         }
     }
 }
-
 __global__ void computeMaterialSortKeys(
     int num_paths,
     const ShadeableIntersection* intersections,
@@ -332,15 +740,6 @@ constexpr int kRussianRouletteStartBounce = 4;
 constexpr float kMinRussianRouletteSurvival = 0.1f;
 constexpr float kMaxRussianRouletteSurvival = 0.95f;
 
-struct SurfaceHit
-{
-    float t;
-    glm::vec3 point;
-    glm::vec3 normal;
-    int geomId;
-    int materialId;
-};
-
 __host__ __device__ inline float maxComponent(const glm::vec3& v)
 {
     return fmaxf(v.x, fmaxf(v.y, v.z));
@@ -355,148 +754,136 @@ __device__ inline glm::vec3 offsetRayOrigin(
     return point + offsetNormal * RAY_ORIGIN_BIAS;
 }
 
-__host__ __device__ inline float geomSurfaceArea(const Geom& geom)
+__device__ inline glm::vec3 sampleTexture(
+    const TextureData& texture,
+    const glm::vec2& uv,
+    const glm::vec3* texturePixels)
 {
+    if (texture.width <= 0 || texture.height <= 0 || texturePixels == nullptr)
+    {
+        return glm::vec3(1.0f);
+    }
+
+    float u = uv.x - floorf(uv.x);
+    float v = uv.y - floorf(uv.y);
+    float x = u * (texture.width - 1);
+    float y = (1.0f - v) * (texture.height - 1);
+
+    int x0 = glm::clamp((int)floorf(x), 0, texture.width - 1);
+    int y0 = glm::clamp((int)floorf(y), 0, texture.height - 1);
+    int x1 = glm::clamp(x0 + 1, 0, texture.width - 1);
+    int y1 = glm::clamp(y0 + 1, 0, texture.height - 1);
+    float tx = x - x0;
+    float ty = y - y0;
+
+    const glm::vec3 c00 = texturePixels[texture.pixelOffset + y0 * texture.width + x0];
+    const glm::vec3 c10 = texturePixels[texture.pixelOffset + y0 * texture.width + x1];
+    const glm::vec3 c01 = texturePixels[texture.pixelOffset + y1 * texture.width + x0];
+    const glm::vec3 c11 = texturePixels[texture.pixelOffset + y1 * texture.width + x1];
+    const glm::vec3 c0 = glm::mix(c00, c10, tx);
+    const glm::vec3 c1 = glm::mix(c01, c11, tx);
+    return glm::mix(c0, c1, ty);
+}
+
+__device__ inline glm::vec3 evaluateMaterialColor(
+    const Material& material,
+    const ShadeableIntersection& intersection,
+    const TextureData* textures,
+    const glm::vec3* texturePixels)
+{
+    if (material.textureId < 0 || textures == nullptr || texturePixels == nullptr)
+    {
+        return material.color;
+    }
+    return material.color * sampleTexture(textures[material.textureId], intersection.uv, texturePixels);
+}
+
+__device__ inline float geomEmissiveArea(const Geom& geom, const Material& material)
+{
+    (void)material;
     if (geom.type == SPHERE)
     {
-        float rx = 0.5f * fabsf(geom.scale.x);
-        float ry = 0.5f * fabsf(geom.scale.y);
-        float rz = 0.5f * fabsf(geom.scale.z);
-        float r = (rx + ry + rz) / 3.0f;
-        return 4.0f * PI * r * r;
+        const float radius = 0.5f * glm::max(geom.scale.x, glm::max(geom.scale.y, geom.scale.z));
+        return 4.0f * PI * radius * radius;
     }
 
-    float sx = fabsf(geom.scale.x);
-    float sy = fabsf(geom.scale.y);
-    float sz = fabsf(geom.scale.z);
-    return 2.0f * (sx * sy + sx * sz + sy * sz);
+    const float sx = geom.scale.x;
+    const float sy = geom.scale.y;
+    const float sz = geom.scale.z;
+    return 2.0f * (sx * sy + sy * sz + sz * sx);
 }
 
-__host__ __device__ inline float geomEmissiveArea(const Geom& geom, const Material& mat)
-{
-    (void)mat;
-    return geomSurfaceArea(geom);
-}
-
-__device__ void samplePointOnSphere(
-    const Geom& sphere,
-    thrust::default_random_engine& rng,
-    glm::vec3& worldPoint,
-    glm::vec3& worldNormal)
-{
-    thrust::uniform_real_distribution<float> u01(0, 1);
-    float z = 1.0f - 2.0f * u01(rng);
-    float r = sqrtf(fmaxf(0.0f, 1.0f - z * z));
-    float phi = TWO_PI * u01(rng);
-    glm::vec3 localDir(r * cosf(phi), r * sinf(phi), z);
-    glm::vec3 localPoint = 0.5f * localDir;
-
-    worldPoint = multiplyMV(sphere.transform, glm::vec4(localPoint, 1.0f));
-    worldNormal = glm::normalize(multiplyMV(sphere.invTranspose, glm::vec4(localDir, 0.0f)));
-}
-
-__device__ void samplePointOnCube(
-    const Geom& cube,
-    thrust::default_random_engine& rng,
-    glm::vec3& worldPoint,
-    glm::vec3& worldNormal)
-{
-    thrust::uniform_real_distribution<float> u01(0, 1);
-    float sx = fabsf(cube.scale.x);
-    float sy = fabsf(cube.scale.y);
-    float sz = fabsf(cube.scale.z);
-    float areaXY = sx * sy;
-    float areaXZ = sx * sz;
-    float areaYZ = sy * sz;
-    float totalArea = 2.0f * (areaXY + areaXZ + areaYZ);
-
-    float pick = u01(rng) * totalArea;
-    float u = u01(rng) - 0.5f;
-    float v = u01(rng) - 0.5f;
-    bool positiveSide = u01(rng) < 0.5f;
-
-    glm::vec3 localPoint(0.0f);
-    glm::vec3 localNormal(0.0f);
-
-    if (pick < 2.0f * areaXY)
-    {
-        localPoint = glm::vec3(u, v, positiveSide ? 0.5f : -0.5f);
-        localNormal = glm::vec3(0.0f, 0.0f, positiveSide ? 1.0f : -1.0f);
-    }
-    else if (pick < 2.0f * (areaXY + areaXZ))
-    {
-        localPoint = glm::vec3(u, positiveSide ? 0.5f : -0.5f, v);
-        localNormal = glm::vec3(0.0f, positiveSide ? 1.0f : -1.0f, 0.0f);
-    }
-    else
-    {
-        localPoint = glm::vec3(positiveSide ? 0.5f : -0.5f, u, v);
-        localNormal = glm::vec3(positiveSide ? 1.0f : -1.0f, 0.0f, 0.0f);
-    }
-
-    worldPoint = multiplyMV(cube.transform, glm::vec4(localPoint, 1.0f));
-    worldNormal = glm::normalize(multiplyMV(cube.invTranspose, glm::vec4(localNormal, 0.0f)));
-}
-
-__device__ bool intersectGeom(
+__device__ inline void samplePointOnSphere(
     const Geom& geom,
-    const Ray& ray,
-    float maxDistance,
-    float& t,
+    thrust::default_random_engine& rng,
     glm::vec3& point,
     glm::vec3& normal)
 {
-    bool outside = true;
-    float hitT = -1.0f;
-    if (geom.type == CUBE)
-    {
-        hitT = boxIntersectionTest(geom, ray, point, normal, outside);
-    }
-    else if (geom.type == SPHERE)
-    {
-        hitT = sphereIntersectionTest(geom, ray, point, normal, outside);
-    }
-
-    if (hitT > MIN_INTERSECTION_T && hitT < maxDistance)
-    {
-        t = hitT;
-        return true;
-    }
-
-    return false;
+    thrust::uniform_real_distribution<float> u01(0, 1);
+    const float z = 1.0f - 2.0f * u01(rng);
+    const float phi = 2.0f * PI * u01(rng);
+    const float r = sqrtf(glm::max(0.0f, 1.0f - z * z));
+    const glm::vec3 localNormal(r * cosf(phi), z, r * sinf(phi));
+    const glm::vec3 localPoint = 0.5f * localNormal;
+    point = multiplyMV(geom.transform, glm::vec4(localPoint, 1.0f));
+    normal = glm::normalize(multiplyMV(geom.invTranspose, glm::vec4(localNormal, 0.0f)));
 }
 
-__device__ bool findClosestHit(
-    const Ray& ray,
-    float maxDistance,
-    int ignoreGeomId,
-    const Geom* geoms,
-    int geoms_size,
-    SurfaceHit& hit)
+__device__ inline void samplePointOnCube(
+    const Geom& geom,
+    thrust::default_random_engine& rng,
+    glm::vec3& point,
+    glm::vec3& normal)
 {
-    hit.t = maxDistance;
-    hit.geomId = -1;
-    hit.materialId = -1;
+    thrust::uniform_real_distribution<float> u01(0, 1);
+    const float sx = geom.scale.x;
+    const float sy = geom.scale.y;
+    const float sz = geom.scale.z;
+    const float aXY = sx * sy;
+    const float aYZ = sy * sz;
+    const float aXZ = sx * sz;
+    const float totalArea = 2.0f * (aXY + aYZ + aXZ);
+    float sample = u01(rng) * totalArea;
 
-    for (int i = 0; i < geoms_size; ++i)
+    glm::vec3 localPoint(0.0f);
+    glm::vec3 localNormal(0.0f);
+    const float u = u01(rng) - 0.5f;
+    const float v = u01(rng) - 0.5f;
+
+    if ((sample -= aYZ) < 0.0f)
     {
-        if (i == ignoreGeomId)
-        {
-            continue;
-        }
-
-        SurfaceHit candidate{};
-        if (intersectGeom(geoms[i], ray, hit.t, candidate.t, candidate.point, candidate.normal))
-        {
-            candidate.geomId = i;
-            candidate.materialId = geoms[i].materialid;
-            hit = candidate;
-        }
+        localPoint = glm::vec3(-0.5f, u, v);
+        localNormal = glm::vec3(-1.0f, 0.0f, 0.0f);
+    }
+    else if ((sample -= aYZ) < 0.0f)
+    {
+        localPoint = glm::vec3(0.5f, u, v);
+        localNormal = glm::vec3(1.0f, 0.0f, 0.0f);
+    }
+    else if ((sample -= aXZ) < 0.0f)
+    {
+        localPoint = glm::vec3(u, -0.5f, v);
+        localNormal = glm::vec3(0.0f, -1.0f, 0.0f);
+    }
+    else if ((sample -= aXZ) < 0.0f)
+    {
+        localPoint = glm::vec3(u, 0.5f, v);
+        localNormal = glm::vec3(0.0f, 1.0f, 0.0f);
+    }
+    else if ((sample -= aXY) < 0.0f)
+    {
+        localPoint = glm::vec3(u, v, -0.5f);
+        localNormal = glm::vec3(0.0f, 0.0f, -1.0f);
+    }
+    else
+    {
+        localPoint = glm::vec3(u, v, 0.5f);
+        localNormal = glm::vec3(0.0f, 0.0f, 1.0f);
     }
 
-    return hit.geomId >= 0;
+    point = multiplyMV(geom.transform, glm::vec4(localPoint, 1.0f));
+    normal = glm::normalize(multiplyMV(geom.invTranspose, glm::vec4(localNormal, 0.0f)));
 }
-
 __device__ float evaluateDiffuseBsdfPdf(
     const Material& material,
     const glm::vec3& shadingNormal,
@@ -513,12 +900,30 @@ __device__ glm::vec3 computeShadowTransmittance(
     float maxDistance,
     int ignoreGeomId,
     const Geom* geoms,
+    const MeshInstance* meshInstances,
+    const ScenePrimitive* scenePrimitives,
+    const SceneBvhNode* sceneBvhNodes,
+    int sceneBvhNodeCount,
     const Material* materials,
-    int geoms_size)
+    const Triangle* triangles,
+    const TriangleBvhNode* triangleBvhNodes,
+    int triangleBvhNodeCount)
 {
     (void)materials;
-    SurfaceHit hit{};
-    return findClosestHit(shadowRay, maxDistance, ignoreGeomId, geoms, geoms_size, hit)
+    TraceHit hit{};
+    return traceSceneClosest(
+        shadowRay,
+        maxDistance,
+        ignoreGeomId,
+        geoms,
+        meshInstances,
+        scenePrimitives,
+        sceneBvhNodes,
+        sceneBvhNodeCount,
+        triangles,
+        triangleBvhNodes,
+        triangleBvhNodeCount,
+        hit)
         ? glm::vec3(0.0f)
         : glm::vec3(1.0f);
 }
@@ -550,7 +955,16 @@ __global__ void shadeMaterialPaths(
     PathSegment* pathSegments,
     const Material* materials,
     const Geom* geoms,
+    const MeshInstance* meshInstances,
+    const ScenePrimitive* scenePrimitives,
+    const SceneBvhNode* sceneBvhNodes,
+    int sceneBvhNodeCount,
     int geoms_size,
+    const Triangle* triangles,
+    const TriangleBvhNode* triangleBvhNodes,
+    int triangleBvhNodeCount,
+    const TextureData* textures,
+    const glm::vec3* texturePixels,
     const int* lightGeomIndices,
     int lightGeomCount,
     glm::vec3* image)
@@ -566,6 +980,8 @@ __global__ void shadeMaterialPaths(
 
         if (intersection.t > 0.0f) {
             const Material& material = materials[intersection.materialId];
+            Material shadingMaterial = material;
+            shadingMaterial.color = evaluateMaterialColor(material, intersection, textures, texturePixels);
 
             // If the material indicates that the object was a light, "light" the ray
             if (material.emittance > 0.0f) {
@@ -582,22 +998,22 @@ __global__ void shadeMaterialPaths(
                     }
                 }
 
-                pathSegment.color *= (material.color * material.emittance * misWeight);
+                pathSegment.color *= (shadingMaterial.color * material.emittance * misWeight);
                 image[pathSegment.pixelIndex] += pathSegment.color;
                 pathSegment.remainingBounces = 0;
             }
             else {
                 thrust::default_random_engine rng = makeSeededRandomEngine(iter, idx, pathSegment.remainingBounces);
                 glm::vec3 intersect = pathSegment.ray.origin + intersection.t * pathSegment.ray.direction;
-                glm::vec3 geometricNormal = intersection.surfaceNormal;
-                glm::vec3 shadingNormal = geometricNormal;
+                glm::vec3 geometricNormal = intersection.geometricNormal;
+                glm::vec3 shadingNormal = intersection.surfaceNormal;
                 if (glm::dot(shadingNormal, pathSegment.ray.direction) > 0.0f) {
                     shadingNormal = -shadingNormal;
                 }
 
                 if (lightGeomCount > 0) {
                     float pDiffuse, pReflect, pRefract;
-                    computeLobeProbabilities(material, pDiffuse, pReflect, pRefract);
+                    computeLobeProbabilities(shadingMaterial, pDiffuse, pReflect, pRefract);
                     if (pDiffuse > 0.0f) {
                         thrust::uniform_real_distribution<float> u01(0, 1);
                         int picked = glm::min((int)(u01(rng) * lightGeomCount), lightGeomCount - 1);
@@ -635,13 +1051,19 @@ __global__ void shadeMaterialPaths(
                                         dist,
                                         lightGeomIdx,
                                         geoms,
+                                        meshInstances,
+                                        scenePrimitives,
+                                        sceneBvhNodes,
+                                        sceneBvhNodeCount,
                                         materials,
-                                        geoms_size);
+                                        triangles,
+                                        triangleBvhNodes,
+                                        triangleBvhNodeCount);
                                     if (glm::length2(shadowTransmittance) > 0.0f) {
                                         float lightPdf = (dist2 / (cosLight * lightArea)) / lightGeomCount;
-                                        float bsdfPdf = evaluateDiffuseBsdfPdf(material, shadingNormal, wi);
+                                        float bsdfPdf = evaluateDiffuseBsdfPdf(shadingMaterial, shadingNormal, wi);
                                         float misWeight = powerHeuristic(lightPdf, bsdfPdf);
-                                        glm::vec3 f = material.color / PI;
+                                        glm::vec3 f = shadingMaterial.color / PI;
                                         glm::vec3 Le = lightMaterial.color * lightMaterial.emittance;
                                         glm::vec3 directLi = pathSegment.color * shadowTransmittance * f * Le
                                             * (cosSurface * misWeight / fmaxf(lightPdf, EPSILON));
@@ -654,7 +1076,7 @@ __global__ void shadeMaterialPaths(
                 }
 
                 BSDFSample sample;
-                scatterRay(pathSegment.ray, geometricNormal, material, rng, sample);
+                scatterRay(pathSegment.ray, geometricNormal, shadingMaterial, rng, sample);
                 if (!sample.isDelta && sample.pdf <= 0.0f) {
                     pathSegment.color = glm::vec3(0.0f);
                     pathSegment.remainingBounces = 0;
@@ -698,6 +1120,8 @@ void pathtrace(uchar4* pbo, int frame, int iter)
     const Camera& cam = hst_scene->state.camera;
     const int pixelcount = cam.resolution.x * cam.resolution.y;
     const int geoms_size = static_cast<int>(hst_scene->geoms.size());
+    const int sceneBvhNodeCount = static_cast<int>(hst_scene->sceneBvhNodes.size());
+    const int triangleBvhNodeCount = static_cast<int>(hst_scene->triangleBvhNodes.size());
 
     // 2D block for generating ray from camera
     const dim3 blockSize2d(8, 8);
@@ -753,7 +1177,13 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             num_paths,
             dev_paths,
             dev_geoms,
-            geoms_size,
+            dev_meshInstances,
+            dev_scenePrimitives,
+            dev_sceneBvhNodes,
+            sceneBvhNodeCount,
+            dev_triangles,
+            dev_triangleBvhNodes,
+            triangleBvhNodeCount,
             dev_intersections
         );
         checkCUDAError("trace one bounce");
@@ -804,7 +1234,16 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             dev_paths,
             dev_materials,
             dev_geoms,
+            dev_meshInstances,
+            dev_scenePrimitives,
+            dev_sceneBvhNodes,
+            sceneBvhNodeCount,
             geoms_size,
+            dev_triangles,
+            dev_triangleBvhNodes,
+            triangleBvhNodeCount,
+            dev_textures,
+            dev_texturePixels,
             dev_lightGeomIndices,
             hst_lightGeomCount,
             dev_image
@@ -868,6 +1307,40 @@ void pathtrace(uchar4* pbo, int frame, int iter)
 
     checkCUDAError("pathtrace");
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

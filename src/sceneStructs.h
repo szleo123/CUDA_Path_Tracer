@@ -15,6 +15,12 @@ enum GeomType
     CUBE
 };
 
+enum ScenePrimitiveType
+{
+    SCENE_PRIMITIVE_GEOM,
+    SCENE_PRIMITIVE_MESH_INSTANCE
+};
+
 struct Ray
 {
     glm::vec3 origin;
@@ -33,6 +39,71 @@ struct Geom
     glm::mat4 invTranspose;
 };
 
+struct Triangle
+{
+    glm::vec3 p0;
+    glm::vec3 p1;
+    glm::vec3 p2;
+    glm::vec3 n0;
+    glm::vec3 n1;
+    glm::vec3 n2;
+    glm::vec3 geometricNormal;
+    glm::vec2 uv0;
+    glm::vec2 uv1;
+    glm::vec2 uv2;
+    int materialId;
+    int hasVertexNormals;
+    int hasUVs;
+};
+
+struct TextureData
+{
+    int width;
+    int height;
+    int pixelOffset;
+};
+
+struct TriangleBvhNode
+{
+    glm::vec3 bboxMin;
+    glm::vec3 bboxMax;
+    int leftFirst;
+    int rightChild;
+    int triCount;
+};
+
+struct MeshInstance
+{
+    int materialId;
+    int triangleStart;
+    int triangleCount;
+    int bvhRootIndex;
+    glm::mat4 transform;
+    glm::mat4 inverseTransform;
+    glm::mat4 invTranspose;
+    glm::vec3 localBboxMin;
+    glm::vec3 localBboxMax;
+    glm::vec3 bboxMin;
+    glm::vec3 bboxMax;
+};
+
+struct ScenePrimitive
+{
+    int type;
+    int index;
+    glm::vec3 bboxMin;
+    glm::vec3 bboxMax;
+};
+
+struct SceneBvhNode
+{
+    glm::vec3 bboxMin;
+    glm::vec3 bboxMax;
+    int leftFirst;
+    int rightChild;
+    int primitiveCount;
+};
+
 struct Material
 {
     glm::vec3 color;
@@ -45,6 +116,7 @@ struct Material
     float hasRefractive;
     float indexOfRefraction;
     float emittance;
+    int textureId;
 };
 
 struct Camera
@@ -78,13 +150,12 @@ struct PathSegment
     int lastBounceWasDelta;
 };
 
-// Use with a corresponding PathSegment to do:
-// 1) color contribution computation
-// 2) BSDF evaluation: generate a new ray
 struct ShadeableIntersection
 {
-  float t;
-  glm::vec3 surfaceNormal;
-  int materialId;
-  int geomId;
+    float t;
+    glm::vec3 surfaceNormal;
+    glm::vec3 geometricNormal;
+    glm::vec2 uv;
+    int materialId;
+    int geomId;
 };
