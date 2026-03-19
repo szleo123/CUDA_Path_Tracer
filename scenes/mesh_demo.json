@@ -104,7 +104,7 @@
         {
             "NAME":"Textured Poster",
             "TYPE":"mesh",
-            "FILE":"../assets/textured_quad/textured_quad.obj",
+            "FILE":"../assets/textured_quad/textured_quad.gltf",
             "MATERIAL":"checker_diffuse",
             "TRANS":[-1.7,4.8,-4.8],
             "ROTAT":[0.0,0.0,0.0],
@@ -113,7 +113,7 @@
         {
             "NAME":"Textured Panel",
             "TYPE":"mesh",
-            "FILE":"../assets/textured_quad/textured_quad.obj",
+            "FILE":"../assets/textured_quad/textured_quad.gltf",
             "MATERIAL":"checker_diffuse",
             "TRANS":[-1.2,3.0,-1.0],
             "ROTAT":[0.0,18.0,0.0],

@@ -33,12 +33,12 @@
                                                         0.34
                                                     ]
                                         },
-                      "mario_clay":  {
+                      "mario_base":  {
                                          "TYPE":  "Diffuse",
                                          "RGB":  [
-                                                     0.94,
-                                                     0.84,
-                                                     0.74
+                                                     1.0,
+                                                     1.0,
+                                                     1.0
                                                  ]
                                      },
                       "specular_white":  {
@@ -208,8 +208,8 @@
                     {
                         "NAME":  "Mario",
                         "TYPE":  "mesh",
-                        "FILE":  "../assets/mario/Mario.obj",
-                        "MATERIAL":  "mario_clay",
+                        "FILE":  "../assets/mario/scene.gltf",
+                        "MATERIAL":  "mario_base",
                         "TRANS":  [
                                       0.0,
                                       0.0,

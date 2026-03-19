@@ -21,6 +21,17 @@ using json = nlohmann::json;
 
 namespace
 {
+struct SceneImportContext
+{
+    const std::filesystem::path& scenePath;
+    std::unordered_map<std::string, uint32_t>& materialNameToId;
+    std::unordered_map<std::string, uint32_t>& texturePathToId;
+    std::unordered_map<std::string, uint32_t>& importedMaterialKeyToId;
+    std::vector<Material>& materials;
+    std::vector<TextureData>& textures;
+    std::vector<glm::vec3>& texturePixels;
+};
+
 std::filesystem::path resolveScenePath(
     const std::filesystem::path& scenePath,
     const std::string& assetPath)
@@ -86,11 +97,12 @@ SceneObjectType parseSceneObjectType(const std::string& type)
     return SceneObjectType::Sphere;
 }
 
-Geom buildGeomFromObject(const SceneObject& object)
+Geom buildGeomFromObject(const SceneObject& object, int objectIndex)
 {
     Geom geom{};
     geom.type = (object.type == SceneObjectType::Cube) ? CUBE : SPHERE;
     geom.materialid = object.materialId;
+    geom.objectIndex = objectIndex;
     geom.translation = object.translation;
     geom.rotation = object.rotation;
     geom.scale = object.scale;
@@ -147,6 +159,7 @@ void appendGeomPrimitive(
 
 void appendMeshInstance(
     const SceneObject& object,
+    int objectIndex,
     std::vector<MeshInstance>& meshInstances,
     std::vector<ScenePrimitive>& scenePrimitives)
 {
@@ -162,6 +175,7 @@ void appendMeshInstance(
 
     MeshInstance meshInstance{};
     meshInstance.materialId = object.materialId;
+    meshInstance.objectIndex = objectIndex;
     meshInstance.triangleStart = object.triangleStart;
     meshInstance.triangleCount = object.triangleCount;
     meshInstance.bvhRootIndex = object.bvhRootIndex;
@@ -199,6 +213,392 @@ std::string defaultObjectName(SceneObjectType type, int index)
     default:
         return "Sphere " + std::to_string(index);
     }
+}
+
+glm::vec3 parseVec3(const json& value)
+{
+    return glm::vec3(value[0], value[1], value[2]);
+}
+
+int ensureTextureLoaded(
+    const std::filesystem::path& texturePath,
+    std::unordered_map<std::string, uint32_t>& texturePathToId,
+    std::vector<TextureData>& textures,
+    std::vector<glm::vec3>& texturePixels)
+{
+    if (texturePath.empty())
+    {
+        return -1;
+    }
+
+    const std::string textureKey = std::filesystem::weakly_canonical(texturePath).string();
+    auto existing = texturePathToId.find(textureKey);
+    if (existing != texturePathToId.end())
+    {
+        return static_cast<int>(existing->second);
+    }
+
+    TextureData texture{};
+    std::string error;
+    if (!loadTextureImage(texturePath, true, texture, texturePixels, error))
+    {
+        throw std::runtime_error(error);
+    }
+    texture.wrapS = 10497;
+    texture.wrapT = 10497;
+
+    const int textureId = static_cast<int>(textures.size());
+    texturePathToId[textureKey] = static_cast<uint32_t>(textureId);
+    textures.push_back(texture);
+    return textureId;
+}
+
+std::string importedMaterialKey(
+    const std::filesystem::path& meshPath,
+    const MeshMaterialDefinition& material)
+{
+    const std::string textureKey = !material.diffuseTextureKey.empty()
+        ? material.diffuseTextureKey
+        : (material.diffuseTexturePath.empty()
+            ? std::string()
+            : std::filesystem::weakly_canonical(material.diffuseTexturePath).string());
+    return meshPath.string()
+        + "|"
+        + material.name
+        + "|"
+        + std::to_string(material.diffuseColor.r)
+        + "|"
+        + std::to_string(material.diffuseColor.g)
+        + "|"
+        + std::to_string(material.diffuseColor.b)
+        + "|"
+        + textureKey
+        + "|"
+        + std::to_string(material.diffuseTexcoordSet)
+        + "|"
+        + std::to_string(material.flipV ? 1 : 0)
+        + "|"
+        + std::to_string(material.wrapS)
+        + "|"
+        + std::to_string(material.wrapT);
+}
+
+int ensureImportedTextureLoaded(
+    const MeshMaterialDefinition& importedMaterial,
+    std::unordered_map<std::string, uint32_t>& texturePathToId,
+    std::vector<TextureData>& textures,
+    std::vector<glm::vec3>& texturePixels)
+{
+    const std::string textureKey = !importedMaterial.diffuseTextureKey.empty()
+        ? importedMaterial.diffuseTextureKey
+        : (importedMaterial.diffuseTexturePath.empty()
+            ? std::string()
+            : std::filesystem::weakly_canonical(importedMaterial.diffuseTexturePath).string());
+    const std::string texturedSamplerKey = textureKey
+        + "|"
+        + std::to_string(importedMaterial.flipV ? 1 : 0)
+        + "|"
+        + std::to_string(importedMaterial.wrapS)
+        + "|"
+        + std::to_string(importedMaterial.wrapT);
+
+    if (textureKey.empty())
+    {
+        return -1;
+    }
+
+    auto existing = texturePathToId.find(texturedSamplerKey);
+    if (existing != texturePathToId.end())
+    {
+        return static_cast<int>(existing->second);
+    }
+
+    TextureData texture{};
+    std::string error;
+    bool loaded = false;
+    if (!importedMaterial.diffuseTextureBytes.empty())
+    {
+        loaded = loadTextureImageFromMemory(
+            importedMaterial.diffuseTextureBytes.data(),
+            importedMaterial.diffuseTextureBytes.size(),
+            importedMaterial.flipV,
+            texture,
+            texturePixels,
+            error);
+    }
+    else if (!importedMaterial.diffuseTexturePath.empty())
+    {
+        loaded = loadTextureImage(importedMaterial.diffuseTexturePath, importedMaterial.flipV, texture, texturePixels, error);
+    }
+
+    if (!loaded)
+    {
+        throw std::runtime_error(error.empty() ? ("Failed to load imported texture: " + textureKey) : error);
+    }
+    texture.wrapS = importedMaterial.wrapS;
+    texture.wrapT = importedMaterial.wrapT;
+
+    const int textureId = static_cast<int>(textures.size());
+    texturePathToId[texturedSamplerKey] = static_cast<uint32_t>(textureId);
+    textures.push_back(texture);
+    return textureId;
+}
+
+int registerImportedMaterial(
+    const std::filesystem::path& meshPath,
+    const Material& baseMaterial,
+    const MeshMaterialDefinition& importedMaterial,
+    std::unordered_map<std::string, uint32_t>& importedMaterialKeyToId,
+    std::unordered_map<std::string, uint32_t>& texturePathToId,
+    std::vector<Material>& materials,
+    std::vector<TextureData>& textures,
+    std::vector<glm::vec3>& texturePixels)
+{
+    const std::string key = importedMaterialKey(meshPath, importedMaterial);
+    auto existing = importedMaterialKeyToId.find(key);
+    if (existing != importedMaterialKeyToId.end())
+    {
+        return static_cast<int>(existing->second);
+    }
+
+    Material material = baseMaterial;
+    material.color = importedMaterial.diffuseColor;
+    material.specular.color = importedMaterial.diffuseColor;
+    material.textureId = ensureImportedTextureLoaded(importedMaterial, texturePathToId, textures, texturePixels);
+
+    const int materialId = static_cast<int>(materials.size());
+    importedMaterialKeyToId[key] = static_cast<uint32_t>(materialId);
+    materials.push_back(material);
+    return materialId;
+}
+
+Material parseMaterialDefinition(
+    const json& materialJson,
+    const std::filesystem::path& scenePath,
+    std::unordered_map<std::string, uint32_t>& texturePathToId,
+    std::vector<TextureData>& textures,
+    std::vector<glm::vec3>& texturePixels)
+{
+    Material material{};
+    material.textureId = -1;
+
+    glm::vec3 baseColor(1.0f);
+    if (materialJson.contains("RGB"))
+    {
+        const auto& col = materialJson["RGB"];
+        baseColor = glm::vec3(col[0], col[1], col[2]);
+    }
+
+    material.color = baseColor;
+    material.specular.color = baseColor;
+    material.specular.exponent = materialJson.value("ROUGHNESS", 0.0f);
+    material.indexOfRefraction = materialJson.value("IOR", 1.5f);
+
+    if (materialJson.contains("TEXTURE"))
+    {
+        const std::filesystem::path texturePath = resolveScenePath(scenePath, materialJson["TEXTURE"]);
+        material.textureId = ensureTextureLoaded(texturePath, texturePathToId, textures, texturePixels);
+    }
+
+    const std::string matType = materialJson["TYPE"];
+    if (matType == "Diffuse")
+    {
+        material.hasReflective = materialJson.value("REFLECTIVITY", 0.0f);
+        material.hasRefractive = materialJson.value("REFRACTIVITY", 0.0f);
+    }
+    else if (matType == "Emitting")
+    {
+        material.emittance = materialJson["EMITTANCE"];
+    }
+    else if (matType == "Specular")
+    {
+        material.hasReflective = materialJson.value("REFLECTIVITY", 1.0f);
+    }
+    else if (matType == "Refractive" || matType == "Glass")
+    {
+        material.hasRefractive = materialJson.value("REFRACTIVITY", 1.0f);
+    }
+    else
+    {
+        material.hasReflective = materialJson.value("REFLECTIVITY", 0.0f);
+        material.hasRefractive = materialJson.value("REFRACTIVITY", 0.0f);
+    }
+
+    return material;
+}
+
+void remapMeshTriangleMaterials(
+    SceneObject& object,
+    const std::filesystem::path& meshPath,
+    const Material& baseMaterial,
+    const std::vector<MeshMaterialDefinition>& importedMaterials,
+    std::unordered_map<std::string, uint32_t>& importedMaterialKeyToId,
+    std::unordered_map<std::string, uint32_t>& texturePathToId,
+    std::vector<Material>& materials,
+    std::vector<TextureData>& textures,
+    std::vector<glm::vec3>& texturePixels)
+{
+    if (importedMaterials.empty())
+    {
+        for (Triangle& triangle : object.localTriangles)
+        {
+            triangle.materialId = object.materialId;
+        }
+        return;
+    }
+
+    std::vector<int> localMaterialToSceneMaterial(importedMaterials.size(), object.materialId);
+    for (size_t i = 0; i < importedMaterials.size(); ++i)
+    {
+        localMaterialToSceneMaterial[i] = registerImportedMaterial(
+            meshPath,
+            baseMaterial,
+            importedMaterials[i],
+            importedMaterialKeyToId,
+            texturePathToId,
+            materials,
+            textures,
+            texturePixels);
+    }
+
+    for (Triangle& triangle : object.localTriangles)
+    {
+        if (triangle.materialId >= 0 && triangle.materialId < static_cast<int>(localMaterialToSceneMaterial.size()))
+        {
+            triangle.materialId = localMaterialToSceneMaterial[triangle.materialId];
+        }
+        else
+        {
+            triangle.materialId = object.materialId;
+        }
+    }
+}
+
+void initializeMeshObject(
+    SceneObject& object,
+    const SceneImportContext& importContext,
+    const Material& baseMaterial,
+    std::vector<MeshMaterialDefinition>& importedMaterials)
+{
+    const std::filesystem::path meshPath = resolveScenePath(importContext.scenePath, object.meshPath);
+    object.meshPath = meshPath.string();
+
+    std::string error;
+    if (!loadMeshAsset(meshPath, object.materialId, object.localTriangles, importedMaterials, error))
+    {
+        throw std::runtime_error(error);
+    }
+
+    remapMeshTriangleMaterials(
+        object,
+        meshPath,
+        baseMaterial,
+        importedMaterials,
+        importContext.importedMaterialKeyToId,
+        importContext.texturePathToId,
+        importContext.materials,
+        importContext.textures,
+        importContext.texturePixels);
+
+    std::vector<Triangle> localTriangles = object.localTriangles;
+    if (!buildTriangleBvh(localTriangles, object.localBvhNodes) || object.localBvhNodes.empty())
+    {
+        throw std::runtime_error("Failed to build mesh BVH: " + meshPath.string());
+    }
+    object.localTriangles.swap(localTriangles);
+    object.localBboxMin = object.localBvhNodes[0].bboxMin;
+    object.localBboxMax = object.localBvhNodes[0].bboxMax;
+}
+
+void loadMaterialsFromJson(const json& materialsData, const SceneImportContext& importContext)
+{
+    for (const auto& item : materialsData.items())
+    {
+        const std::string& name = item.key();
+        const Material material = parseMaterialDefinition(
+            item.value(),
+            importContext.scenePath,
+            importContext.texturePathToId,
+            importContext.textures,
+            importContext.texturePixels);
+
+        importContext.materialNameToId[name] = static_cast<uint32_t>(importContext.materials.size());
+        importContext.materials.push_back(material);
+    }
+}
+
+SceneObject parseSceneObjectDefinition(
+    const json& objectJson,
+    int objectIndex,
+    const std::unordered_map<std::string, uint32_t>& materialNameToId)
+{
+    SceneObject object{};
+    object.type = parseSceneObjectType(objectJson["TYPE"]);
+    object.materialId = static_cast<int>(materialNameToId.at(objectJson["MATERIAL"]));
+    object.name = objectJson.value("NAME", defaultObjectName(object.type, objectIndex));
+    object.translation = parseVec3(objectJson["TRANS"]);
+    object.rotation = parseVec3(objectJson["ROTAT"]);
+    object.scale = parseVec3(objectJson["SCALE"]);
+
+    if (object.type == SceneObjectType::Mesh)
+    {
+        object.meshPath = objectJson["FILE"];
+    }
+
+    return object;
+}
+
+void loadObjectsFromJson(
+    const json& objectsData,
+    const SceneImportContext& importContext,
+    std::vector<SceneObject>& objects)
+{
+    for (size_t objectIndex = 0; objectIndex < objectsData.size(); ++objectIndex)
+    {
+        SceneObject object = parseSceneObjectDefinition(
+            objectsData[objectIndex],
+            static_cast<int>(objectIndex),
+            importContext.materialNameToId);
+
+        if (object.type == SceneObjectType::Mesh)
+        {
+            std::vector<MeshMaterialDefinition> importedMaterials;
+            initializeMeshObject(object, importContext, importContext.materials[object.materialId], importedMaterials);
+        }
+
+        objects.push_back(std::move(object));
+    }
+}
+
+void configureCameraFromJson(const json& cameraData, RenderState& renderState)
+{
+    Camera& camera = renderState.camera;
+    camera.resolution.x = cameraData["RES"][0];
+    camera.resolution.y = cameraData["RES"][1];
+
+    const float fovy = cameraData["FOVY"];
+    renderState.iterations = cameraData["ITERATIONS"];
+    renderState.traceDepth = cameraData["DEPTH"];
+    renderState.imageName = cameraData["FILE"];
+    camera.position = parseVec3(cameraData["EYE"]);
+    camera.lookAt = parseVec3(cameraData["LOOKAT"]);
+    camera.up = parseVec3(cameraData["UP"]);
+
+    const float yscaled = tan(fovy * (PI / 180.0f));
+    const float xscaled = (yscaled * camera.resolution.x) / camera.resolution.y;
+    const float fovx = (atan(xscaled) * 180.0f) / PI;
+    camera.fov = glm::vec2(fovx, fovy);
+
+    camera.view = glm::normalize(camera.lookAt - camera.position);
+    camera.right = glm::normalize(glm::cross(camera.view, camera.up));
+    camera.up = glm::normalize(glm::cross(camera.right, camera.view));
+    camera.pixelLength = glm::vec2(
+        2.0f * xscaled / static_cast<float>(camera.resolution.x),
+        2.0f * yscaled / static_cast<float>(camera.resolution.y));
+
+    const int pixelCount = camera.resolution.x * camera.resolution.y;
+    renderState.image.resize(pixelCount);
+    std::fill(renderState.image.begin(), renderState.image.end(), glm::vec3(0.0f));
 }
 }
 
@@ -282,16 +682,17 @@ void Scene::rebuildRenderData()
     scenePrimitives.clear();
     sceneBvhNodes.clear();
 
-    for (const SceneObject& object : objects)
+    for (size_t objectIndex = 0; objectIndex < objects.size(); ++objectIndex)
     {
+        const SceneObject& object = objects[objectIndex];
         if (object.type == SceneObjectType::Mesh)
         {
-            appendMeshInstance(object, meshInstances, scenePrimitives);
+            appendMeshInstance(object, static_cast<int>(objectIndex), meshInstances, scenePrimitives);
             continue;
         }
 
         const int geomIndex = static_cast<int>(geoms.size());
-        geoms.push_back(buildGeomFromObject(object));
+        geoms.push_back(buildGeomFromObject(object, static_cast<int>(objectIndex)));
         appendGeomPrimitive(geoms.back(), geomIndex, scenePrimitives);
     }
 
@@ -326,150 +727,24 @@ void Scene::loadFromJSON(const std::string& jsonName)
     }
 
     json data = json::parse(f);
-    const auto& materialsData = data["Materials"];
-    std::unordered_map<std::string, uint32_t> matNameToId;
+    std::unordered_map<std::string, uint32_t> materialNameToId;
     std::unordered_map<std::string, uint32_t> texturePathToId;
+    std::unordered_map<std::string, uint32_t> importedMaterialKeyToId;
+    SceneImportContext importContext{
+        scenePath,
+        materialNameToId,
+        texturePathToId,
+        importedMaterialKeyToId,
+        materials,
+        textures,
+        texturePixels
+    };
 
-    for (const auto& item : materialsData.items())
-    {
-        const auto& name = item.key();
-        const auto& p = item.value();
-        Material newMaterial{};
-        newMaterial.textureId = -1;
-
-        glm::vec3 baseColor(1.0f);
-        if (p.contains("RGB"))
-        {
-            const auto& col = p["RGB"];
-            baseColor = glm::vec3(col[0], col[1], col[2]);
-        }
-
-        newMaterial.color = baseColor;
-        newMaterial.specular.color = baseColor;
-        newMaterial.specular.exponent = p.value("ROUGHNESS", 0.0f);
-        newMaterial.indexOfRefraction = p.value("IOR", 1.5f);
-
-        if (p.contains("TEXTURE"))
-        {
-            const std::filesystem::path texturePath = resolveScenePath(scenePath, p["TEXTURE"]);
-            const std::string textureKey = texturePath.lexically_normal().string();
-            auto existing = texturePathToId.find(textureKey);
-            if (existing != texturePathToId.end())
-            {
-                newMaterial.textureId = static_cast<int>(existing->second);
-            }
-            else
-            {
-                TextureData texture{};
-                std::string error;
-                if (!loadTextureImage(texturePath, texture, texturePixels, error))
-                {
-                    throw std::runtime_error(error);
-                }
-                newMaterial.textureId = static_cast<int>(textures.size());
-                texturePathToId[textureKey] = static_cast<uint32_t>(textures.size());
-                textures.push_back(texture);
-            }
-        }
-
-        const std::string matType = p["TYPE"];
-
-        if (matType == "Diffuse")
-        {
-            newMaterial.hasReflective = p.value("REFLECTIVITY", 0.0f);
-            newMaterial.hasRefractive = p.value("REFRACTIVITY", 0.0f);
-        }
-        else if (matType == "Emitting")
-        {
-            newMaterial.emittance = p["EMITTANCE"];
-        }
-        else if (matType == "Specular")
-        {
-            newMaterial.hasReflective = p.value("REFLECTIVITY", 1.0f);
-        }
-        else if (matType == "Refractive" || matType == "Glass")
-        {
-            newMaterial.hasRefractive = p.value("REFRACTIVITY", 1.0f);
-        }
-        else
-        {
-            newMaterial.hasReflective = p.value("REFLECTIVITY", 0.0f);
-            newMaterial.hasRefractive = p.value("REFRACTIVITY", 0.0f);
-        }
-        matNameToId[name] = static_cast<uint32_t>(materials.size());
-        materials.emplace_back(newMaterial);
-    }
-
-    const auto& objectsData = data["Objects"];
-    int objectIndex = 0;
-    for (const auto& p : objectsData)
-    {
-        SceneObject object{};
-        object.type = parseSceneObjectType(p["TYPE"]);
-        object.materialId = static_cast<int>(matNameToId[p["MATERIAL"]]);
-        object.name = p.value("NAME", defaultObjectName(object.type, objectIndex));
-        const auto& trans = p["TRANS"];
-        const auto& rotat = p["ROTAT"];
-        const auto& scale = p["SCALE"];
-        object.translation = glm::vec3(trans[0], trans[1], trans[2]);
-        object.rotation = glm::vec3(rotat[0], rotat[1], rotat[2]);
-        object.scale = glm::vec3(scale[0], scale[1], scale[2]);
-
-        if (object.type == SceneObjectType::Mesh)
-        {
-            const std::filesystem::path meshPath = resolveScenePath(scenePath, p["FILE"]);
-            object.meshPath = meshPath.string();
-            std::string error;
-            if (!loadObjMesh(meshPath, glm::mat4(1.0f), glm::mat4(1.0f), object.materialId, object.localTriangles, error))
-            {
-                throw std::runtime_error(error);
-            }
-            std::vector<Triangle> localTriangles = object.localTriangles;
-            if (!buildTriangleBvh(localTriangles, object.localBvhNodes) || object.localBvhNodes.empty())
-            {
-                throw std::runtime_error("Failed to build mesh BVH: " + meshPath.string());
-            }
-            object.localTriangles.swap(localTriangles);
-            object.localBboxMin = object.localBvhNodes[0].bboxMin;
-            object.localBboxMax = object.localBvhNodes[0].bboxMax;
-        }
-
-        objects.push_back(object);
-        ++objectIndex;
-    }
+    loadMaterialsFromJson(data["Materials"], importContext);
+    loadObjectsFromJson(data["Objects"], importContext, objects);
 
     rebuildStaticMeshData();
     rebuildRenderData();
-
-    const auto& cameraData = data["Camera"];
-    Camera& camera = state.camera;
-    RenderState& state = this->state;
-    camera.resolution.x = cameraData["RES"][0];
-    camera.resolution.y = cameraData["RES"][1];
-    float fovy = cameraData["FOVY"];
-    state.iterations = cameraData["ITERATIONS"];
-    state.traceDepth = cameraData["DEPTH"];
-    state.imageName = cameraData["FILE"];
-    const auto& pos = cameraData["EYE"];
-    const auto& lookat = cameraData["LOOKAT"];
-    const auto& up = cameraData["UP"];
-    camera.position = glm::vec3(pos[0], pos[1], pos[2]);
-    camera.lookAt = glm::vec3(lookat[0], lookat[1], lookat[2]);
-    camera.up = glm::vec3(up[0], up[1], up[2]);
-
-    float yscaled = tan(fovy * (PI / 180));
-    float xscaled = (yscaled * camera.resolution.x) / camera.resolution.y;
-    float fovx = (atan(xscaled) * 180) / PI;
-    camera.fov = glm::vec2(fovx, fovy);
-
-    camera.view = glm::normalize(camera.lookAt - camera.position);
-    camera.right = glm::normalize(glm::cross(camera.view, camera.up));
-    camera.up = glm::normalize(glm::cross(camera.right, camera.view));
-    camera.pixelLength = glm::vec2(2 * xscaled / (float)camera.resolution.x,
-        2 * yscaled / (float)camera.resolution.y);
-
-    int arraylen = camera.resolution.x * camera.resolution.y;
-    state.image.resize(arraylen);
-    std::fill(state.image.begin(), state.image.end(), glm::vec3());
+    configureCameraFromJson(data["Camera"], state);
 }
 

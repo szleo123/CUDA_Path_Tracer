@@ -31,6 +31,7 @@ struct Geom
 {
     enum GeomType type;
     int materialid;
+    int objectIndex;
     glm::vec3 translation;
     glm::vec3 rotation;
     glm::vec3 scale;
@@ -61,6 +62,9 @@ struct TextureData
     int width;
     int height;
     int pixelOffset;
+    int flipV;
+    int wrapS;
+    int wrapT;
 };
 
 struct TriangleBvhNode
@@ -75,6 +79,7 @@ struct TriangleBvhNode
 struct MeshInstance
 {
     int materialId;
+    int objectIndex;
     int triangleStart;
     int triangleCount;
     int bvhRootIndex;

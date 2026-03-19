@@ -89,6 +89,23 @@ void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods);
 
 namespace
 {
+void applyObjectTransform(int objectIndex, const glm::vec3& translation, const glm::vec3& rotation, const glm::vec3& scale);
+
+const char* getRenderDebugModeLabel(int mode)
+{
+    switch (mode)
+    {
+    case RENDER_DEBUG_MESH_UV_CHECKER:
+        return "Mesh UV Checker";
+    case RENDER_DEBUG_MESH_BASE_COLOR:
+        return "Mesh Base Color";
+    case RENDER_DEBUG_MESH_TEXTURE_ONLY:
+        return "Mesh Texture Only";
+    default:
+        return "None";
+    }
+}
+
 const char* getTransformModeLabel(TransformMode mode)
 {
     switch (mode)
@@ -100,6 +117,158 @@ const char* getTransformModeLabel(TransformMode mode)
     default:
         return "Translate";
     }
+}
+
+bool transformModeButton(const char* label, TransformMode mode)
+{
+    if (!ImGui::Button(label))
+    {
+        return false;
+    }
+
+    activeTransformMode = mode;
+    return true;
+}
+
+void renderMainMenuBar()
+{
+    if (!ImGui::BeginMainMenuBar())
+    {
+        return;
+    }
+
+    if (ImGui::BeginMenu("View"))
+    {
+        ImGui::MenuItem("Analytics", nullptr, &showAnalyticsWindow);
+        ImGui::MenuItem("Scene Objects", nullptr, &showSceneObjectsWindow);
+        ImGui::MenuItem("Viewport Gizmo", nullptr, &showViewportGizmo);
+        ImGui::EndMenu();
+    }
+
+    if (ImGui::BeginMenu("Transform"))
+    {
+        if (ImGui::MenuItem("Translate", "W", activeTransformMode == TransformMode::Translate))
+        {
+            activeTransformMode = TransformMode::Translate;
+        }
+        if (ImGui::MenuItem("Rotate", "E", activeTransformMode == TransformMode::Rotate))
+        {
+            activeTransformMode = TransformMode::Rotate;
+        }
+        if (ImGui::MenuItem("Scale", "R", activeTransformMode == TransformMode::Scale))
+        {
+            activeTransformMode = TransformMode::Scale;
+        }
+        ImGui::EndMenu();
+    }
+
+    ImGui::EndMainMenuBar();
+}
+
+void renderAnalyticsWindow()
+{
+    ImGui::Begin("Path Tracer Analytics", &showAnalyticsWindow);
+
+    if (ImGui::Checkbox("Sort by Material", &imguiData->UseMaterialSort))
+    {
+        iteration = 0;
+    }
+
+    const char* renderDebugLabels[] = { "None", "Mesh UV Checker", "Mesh Base Color", "Mesh Texture Only" };
+    if (ImGui::Combo("Render Debug", &imguiData->RenderDebugModeValue, renderDebugLabels, IM_ARRAYSIZE(renderDebugLabels)))
+    {
+        iteration = 0;
+    }
+
+    if (imguiData->UseMaterialSort)
+    {
+        if (ImGui::SliderInt("Sort Every N Iter", &imguiData->SortEveryNIterations, 1, 32))
+        {
+            iteration = 0;
+        }
+        if (ImGui::SliderInt("Sort Max Bounce", &imguiData->SortMaxBounce, 1, 16))
+        {
+            iteration = 0;
+        }
+        if (ImGui::SliderInt("Sort Min Paths", &imguiData->SortMinPathCount, 1024, 262144))
+        {
+            iteration = 0;
+        }
+    }
+
+    ImGui::Text("Render Debug %s", getRenderDebugModeLabel(imguiData->RenderDebugModeValue));
+    ImGui::Text("Traced Depth %d", imguiData->TracedDepth);
+    ImGui::Text("Last Sort Time %.3f ms", imguiData->LastSortTimeMs);
+    ImGui::Text("Last Shade Time %.3f ms", imguiData->LastShadeTimeMs);
+    ImGui::Text("Last Shaded Paths %d", imguiData->LastNumShadedPaths);
+    ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
+    ImGui::End();
+}
+
+void renderSceneObjectsWindow()
+{
+    ImGui::Begin("Scene Objects", &showSceneObjectsWindow);
+    ImGui::Text("Mode: %s", getTransformModeLabel(activeTransformMode));
+    transformModeButton("Translate", TransformMode::Translate);
+    ImGui::SameLine();
+    transformModeButton("Rotate", TransformMode::Rotate);
+    ImGui::SameLine();
+    transformModeButton("Scale", TransformMode::Scale);
+    ImGui::Separator();
+    ImGui::TextUnformatted("Viewport controls:");
+    ImGui::BulletText("Left click selects and drags the picked object");
+    ImGui::BulletText("W / E / R switch translate / rotate / scale");
+    ImGui::BulletText("Alt + Left orbit, Alt + Middle pan, Alt + Right zoom");
+
+    if (scene->objects.empty())
+    {
+        ImGui::Text("No editable objects in scene.");
+        ImGui::End();
+        return;
+    }
+
+    if (ImGui::BeginListBox("Objects"))
+    {
+        for (int i = 0; i < static_cast<int>(scene->objects.size()); ++i)
+        {
+            const bool isSelected = (selectedObjectIndex == i);
+            if (ImGui::Selectable(scene->objects[i].name.c_str(), isSelected))
+            {
+                selectedObjectIndex = i;
+            }
+            if (isSelected)
+            {
+                ImGui::SetItemDefaultFocus();
+            }
+        }
+        ImGui::EndListBox();
+    }
+
+    if (selectedObjectIndex < 0 || selectedObjectIndex >= static_cast<int>(scene->objects.size()))
+    {
+        ImGui::TextUnformatted("Click an object in the viewport to select it.");
+        ImGui::End();
+        return;
+    }
+
+    SceneObject& object = scene->objects[selectedObjectIndex];
+    ImGui::Separator();
+    ImGui::Text("Selected: %s", object.name.c_str());
+
+    glm::vec3 translation = object.translation;
+    glm::vec3 rotation = object.rotation;
+    glm::vec3 scale = object.scale;
+    bool changed = false;
+    changed |= ImGui::DragFloat3("Translate", &translation[0], 0.05f);
+    changed |= ImGui::DragFloat3("Rotate", &rotation[0], 1.0f);
+    changed |= ImGui::DragFloat3("Scale", &scale[0], 0.05f, 0.01f, 100.0f);
+
+    if (changed)
+    {
+        applyObjectTransform(selectedObjectIndex, translation, rotation, scale);
+    }
+
+    ImGui::End();
 }
 
 bool isAltPressed(GLFWwindow* window)
@@ -150,37 +319,179 @@ Ray buildCameraRay(double xpos, double ypos)
     return ray;
 }
 
-Geom buildEditableGeom(const SceneObject& object)
+bool intersectAabbForPicking(
+    const Ray& ray,
+    const glm::vec3& bboxMin,
+    const glm::vec3& bboxMax,
+    float tMax,
+    float& tEntry)
 {
-    Geom geom{};
-    geom.type = (object.type == SceneObjectType::Cube) ? CUBE : SPHERE;
-    geom.materialid = object.materialId;
-    geom.translation = object.translation;
-    geom.rotation = object.rotation;
-    geom.scale = object.scale;
-    geom.transform = utilityCore::buildTransformationMatrix(object.translation, object.rotation, object.scale);
-    geom.inverseTransform = glm::inverse(geom.transform);
-    geom.invTranspose = glm::inverseTranspose(geom.transform);
-    return geom;
+    float tMin = 0.0f;
+    float tFar = tMax;
+
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        const float origin = ray.origin[axis];
+        const float direction = ray.direction[axis];
+        if (fabsf(direction) < EPSILON)
+        {
+            if (origin < bboxMin[axis] || origin > bboxMax[axis])
+            {
+                return false;
+            }
+            continue;
+        }
+
+        const float invDir = 1.0f / direction;
+        float t0 = (bboxMin[axis] - origin) * invDir;
+        float t1 = (bboxMax[axis] - origin) * invDir;
+        if (t0 > t1)
+        {
+            std::swap(t0, t1);
+        }
+
+        tMin = std::max(tMin, t0);
+        tFar = std::min(tFar, t1);
+        if (tMin > tFar)
+        {
+            return false;
+        }
+    }
+
+    tEntry = tMin;
+    return true;
 }
 
-Triangle transformTriangleForPicking(const Triangle& triangle, const SceneObject& object)
+Ray transformRayForPicking(const Ray& ray, const glm::mat4& transform)
 {
-    const glm::mat4 transform = utilityCore::buildTransformationMatrix(
-        object.translation,
-        object.rotation,
-        object.scale);
-    const glm::mat4 invTranspose = glm::inverseTranspose(transform);
+    Ray transformedRay{};
+    transformedRay.origin = multiplyMV(transform, glm::vec4(ray.origin, 1.0f));
+    transformedRay.direction = glm::normalize(multiplyMV(transform, glm::vec4(ray.direction, 0.0f)));
+    return transformedRay;
+}
 
-    Triangle worldTriangle = triangle;
-    worldTriangle.p0 = glm::vec3(transform * glm::vec4(triangle.p0, 1.0f));
-    worldTriangle.p1 = glm::vec3(transform * glm::vec4(triangle.p1, 1.0f));
-    worldTriangle.p2 = glm::vec3(transform * glm::vec4(triangle.p2, 1.0f));
-    worldTriangle.geometricNormal = glm::normalize(glm::vec3(invTranspose * glm::vec4(triangle.geometricNormal, 0.0f)));
-    worldTriangle.n0 = glm::normalize(glm::vec3(invTranspose * glm::vec4(triangle.n0, 0.0f)));
-    worldTriangle.n1 = glm::normalize(glm::vec3(invTranspose * glm::vec4(triangle.n1, 0.0f)));
-    worldTriangle.n2 = glm::normalize(glm::vec3(invTranspose * glm::vec4(triangle.n2, 0.0f)));
-    return worldTriangle;
+bool intersectGeomForPicking(const Geom& geom, const Ray& ray, float maxDistance, float& outT)
+{
+    glm::vec3 intersectionPoint;
+    glm::vec3 normal;
+    bool outside = false;
+    const float t = (geom.type == CUBE)
+        ? boxIntersectionTest(geom, ray, intersectionPoint, normal, outside)
+        : sphereIntersectionTest(geom, ray, intersectionPoint, normal, outside);
+
+    if (t > MIN_INTERSECTION_T && t < maxDistance)
+    {
+        outT = t;
+        return true;
+    }
+    return false;
+}
+
+bool traverseTriangleBvhForPicking(
+    const Scene& sceneRef,
+    const MeshInstance& meshInstance,
+    const Ray& worldRay,
+    float maxDistance,
+    float& outT)
+{
+    if (meshInstance.bvhRootIndex < 0)
+    {
+        return false;
+    }
+
+    const Ray localRay = transformRayForPicking(worldRay, meshInstance.inverseTransform);
+    constexpr int kMaxBvhStackSize = 64;
+    const float maxFloat = std::numeric_limits<float>::max();
+    int stack[kMaxBvhStackSize];
+    int stackSize = 0;
+    stack[stackSize++] = meshInstance.bvhRootIndex;
+    bool hit = false;
+    outT = maxDistance;
+
+    while (stackSize > 0)
+    {
+        const TriangleBvhNode& node = sceneRef.triangleBvhNodes[stack[--stackSize]];
+        float nodeEntry = 0.0f;
+        if (!intersectAabbForPicking(localRay, node.bboxMin, node.bboxMax, maxFloat, nodeEntry))
+        {
+            continue;
+        }
+
+        if (node.triCount > 0)
+        {
+            for (int i = 0; i < node.triCount; ++i)
+            {
+                const Triangle& triangle = sceneRef.triangles[node.leftFirst + i];
+                glm::vec3 intersectionPoint;
+                glm::vec3 shadingNormal;
+                glm::vec3 geometricNormal;
+                glm::vec2 uv;
+                const float localT = triangleIntersectionTest(
+                    triangle,
+                    localRay,
+                    intersectionPoint,
+                    shadingNormal,
+                    geometricNormal,
+                    uv);
+                if (localT <= MIN_INTERSECTION_T)
+                {
+                    continue;
+                }
+
+                const glm::vec3 worldPoint = multiplyMV(meshInstance.transform, glm::vec4(intersectionPoint, 1.0f));
+                const float worldT = glm::length(worldPoint - worldRay.origin);
+                if (worldT > MIN_INTERSECTION_T && worldT < outT)
+                {
+                    outT = worldT;
+                    hit = true;
+                }
+            }
+            continue;
+        }
+
+        const int leftChild = node.leftFirst;
+        const int rightChild = node.rightChild;
+        float leftEntry = 0.0f;
+        float rightEntry = 0.0f;
+        const bool hitLeft = intersectAabbForPicking(
+            localRay,
+            sceneRef.triangleBvhNodes[leftChild].bboxMin,
+            sceneRef.triangleBvhNodes[leftChild].bboxMax,
+            maxFloat,
+            leftEntry);
+        const bool hitRight = intersectAabbForPicking(
+            localRay,
+            sceneRef.triangleBvhNodes[rightChild].bboxMin,
+            sceneRef.triangleBvhNodes[rightChild].bboxMax,
+            maxFloat,
+            rightEntry);
+
+        if (hitLeft && hitRight)
+        {
+            const bool leftFirst = leftEntry < rightEntry;
+            if (stackSize + 2 <= kMaxBvhStackSize)
+            {
+                stack[stackSize++] = leftFirst ? rightChild : leftChild;
+                stack[stackSize++] = leftFirst ? leftChild : rightChild;
+            }
+        }
+        else if (hitLeft)
+        {
+            if (stackSize + 1 <= kMaxBvhStackSize)
+            {
+                stack[stackSize++] = leftChild;
+            }
+        }
+        else if (hitRight)
+        {
+            if (stackSize + 1 <= kMaxBvhStackSize)
+            {
+                stack[stackSize++] = rightChild;
+            }
+        }
+    }
+
+    return hit;
 }
 
 int pickSceneObject(double xpos, double ypos)
@@ -194,47 +505,99 @@ int pickSceneObject(double xpos, double ypos)
     float closestT = std::numeric_limits<float>::max();
     int pickedIndex = -1;
 
-    for (int i = 0; i < static_cast<int>(scene->objects.size()); ++i)
+    if (scene->sceneBvhNodes.empty() || scene->scenePrimitives.empty())
     {
-        const SceneObject& object = scene->objects[i];
+        return -1;
+    }
 
-        if (object.type == SceneObjectType::Mesh)
+    constexpr int kMaxBvhStackSize = 64;
+    int stack[kMaxBvhStackSize];
+    int stackSize = 0;
+    stack[stackSize++] = 0;
+
+    while (stackSize > 0)
+    {
+        const SceneBvhNode& node = scene->sceneBvhNodes[stack[--stackSize]];
+        float nodeEntry = 0.0f;
+        if (!intersectAabbForPicking(ray, node.bboxMin, node.bboxMax, closestT, nodeEntry))
         {
-            for (const Triangle& localTriangle : object.localTriangles)
+            continue;
+        }
+
+        if (node.primitiveCount > 0)
+        {
+            for (int i = 0; i < node.primitiveCount; ++i)
             {
-                Triangle worldTriangle = transformTriangleForPicking(localTriangle, object);
-                glm::vec3 intersectionPoint;
-                glm::vec3 shadingNormal;
-                glm::vec3 geometricNormal;
-                glm::vec2 uv;
-                const float triangleT = triangleIntersectionTest(
-                    worldTriangle,
-                    ray,
-                    intersectionPoint,
-                    shadingNormal,
-                    geometricNormal,
-                    uv);
-                if (triangleT > 0.0f && triangleT < closestT)
+                const ScenePrimitive& primitive = scene->scenePrimitives[node.leftFirst + i];
+                float candidateT = closestT;
+                bool hit = false;
+
+                if (primitive.type == SCENE_PRIMITIVE_GEOM)
                 {
-                    closestT = triangleT;
-                    pickedIndex = i;
+                    const Geom& geom = scene->geoms[primitive.index];
+                    hit = intersectGeomForPicking(geom, ray, closestT, candidateT);
+                    if (hit)
+                    {
+                        pickedIndex = geom.objectIndex;
+                    }
+                }
+                else if (primitive.type == SCENE_PRIMITIVE_MESH_INSTANCE)
+                {
+                    const MeshInstance& meshInstance = scene->meshInstances[primitive.index];
+                    hit = traverseTriangleBvhForPicking(*scene, meshInstance, ray, closestT, candidateT);
+                    if (hit)
+                    {
+                        pickedIndex = meshInstance.objectIndex;
+                    }
+                }
+
+                if (hit && candidateT < closestT)
+                {
+                    closestT = candidateT;
                 }
             }
             continue;
         }
 
-        Geom geom = buildEditableGeom(object);
-        glm::vec3 intersectionPoint;
-        glm::vec3 normal;
-        bool outside = false;
-        const float t = (object.type == SceneObjectType::Cube)
-            ? boxIntersectionTest(geom, ray, intersectionPoint, normal, outside)
-            : sphereIntersectionTest(geom, ray, intersectionPoint, normal, outside);
+        const int leftChild = node.leftFirst;
+        const int rightChild = node.rightChild;
+        float leftEntry = 0.0f;
+        float rightEntry = 0.0f;
+        const bool hitLeft = intersectAabbForPicking(
+            ray,
+            scene->sceneBvhNodes[leftChild].bboxMin,
+            scene->sceneBvhNodes[leftChild].bboxMax,
+            closestT,
+            leftEntry);
+        const bool hitRight = intersectAabbForPicking(
+            ray,
+            scene->sceneBvhNodes[rightChild].bboxMin,
+            scene->sceneBvhNodes[rightChild].bboxMax,
+            closestT,
+            rightEntry);
 
-        if (t > 0.0f && t < closestT)
+        if (hitLeft && hitRight)
         {
-            closestT = t;
-            pickedIndex = i;
+            const bool leftFirst = leftEntry < rightEntry;
+            if (stackSize + 2 <= kMaxBvhStackSize)
+            {
+                stack[stackSize++] = leftFirst ? rightChild : leftChild;
+                stack[stackSize++] = leftFirst ? leftChild : rightChild;
+            }
+        }
+        else if (hitLeft)
+        {
+            if (stackSize + 1 <= kMaxBvhStackSize)
+            {
+                stack[stackSize++] = leftChild;
+            }
+        }
+        else if (hitRight)
+        {
+            if (stackSize + 1 <= kMaxBvhStackSize)
+            {
+                stack[stackSize++] = rightChild;
+            }
         }
     }
 
@@ -610,137 +973,16 @@ void RenderImGui()
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
 
-    if (ImGui::BeginMainMenuBar())
-    {
-        if (ImGui::BeginMenu("View"))
-        {
-            ImGui::MenuItem("Analytics", nullptr, &showAnalyticsWindow);
-            ImGui::MenuItem("Scene Objects", nullptr, &showSceneObjectsWindow);
-            ImGui::MenuItem("Viewport Gizmo", nullptr, &showViewportGizmo);
-            ImGui::EndMenu();
-        }
-
-        if (ImGui::BeginMenu("Transform"))
-        {
-            if (ImGui::MenuItem("Translate", "W", activeTransformMode == TransformMode::Translate))
-            {
-                activeTransformMode = TransformMode::Translate;
-            }
-            if (ImGui::MenuItem("Rotate", "E", activeTransformMode == TransformMode::Rotate))
-            {
-                activeTransformMode = TransformMode::Rotate;
-            }
-            if (ImGui::MenuItem("Scale", "R", activeTransformMode == TransformMode::Scale))
-            {
-                activeTransformMode = TransformMode::Scale;
-            }
-            ImGui::EndMenu();
-        }
-        ImGui::EndMainMenuBar();
-    }
+    renderMainMenuBar();
 
     if (showAnalyticsWindow)
     {
-        ImGui::Begin("Path Tracer Analytics", &showAnalyticsWindow);
-        if (ImGui::Checkbox("Sort by Material", &imguiData->UseMaterialSort))
-        {
-            iteration = 0;
-        }
-        if (imguiData->UseMaterialSort)
-        {
-            if (ImGui::SliderInt("Sort Every N Iter", &imguiData->SortEveryNIterations, 1, 32))
-            {
-                iteration = 0;
-            }
-            if (ImGui::SliderInt("Sort Max Bounce", &imguiData->SortMaxBounce, 1, 16))
-            {
-                iteration = 0;
-            }
-            if (ImGui::SliderInt("Sort Min Paths", &imguiData->SortMinPathCount, 1024, 262144))
-            {
-                iteration = 0;
-            }
-        }
-        ImGui::Text("Traced Depth %d", imguiData->TracedDepth);
-        ImGui::Text("Last Sort Time %.3f ms", imguiData->LastSortTimeMs);
-        ImGui::Text("Last Shade Time %.3f ms", imguiData->LastShadeTimeMs);
-        ImGui::Text("Last Shaded Paths %d", imguiData->LastNumShadedPaths);
-        ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
-        ImGui::End();
+        renderAnalyticsWindow();
     }
 
     if (showSceneObjectsWindow)
     {
-        ImGui::Begin("Scene Objects", &showSceneObjectsWindow);
-        ImGui::Text("Mode: %s", getTransformModeLabel(activeTransformMode));
-        if (ImGui::Button("Translate"))
-        {
-            activeTransformMode = TransformMode::Translate;
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Rotate"))
-        {
-            activeTransformMode = TransformMode::Rotate;
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Scale"))
-        {
-            activeTransformMode = TransformMode::Scale;
-        }
-        ImGui::Separator();
-        ImGui::TextUnformatted("Viewport controls:");
-        ImGui::BulletText("Left click selects and drags the picked object");
-        ImGui::BulletText("W / E / R switch translate / rotate / scale");
-        ImGui::BulletText("Alt + Left orbit, Alt + Middle pan, Alt + Right zoom");
-
-        if (!scene->objects.empty())
-        {
-            if (ImGui::BeginListBox("Objects"))
-            {
-                for (int i = 0; i < static_cast<int>(scene->objects.size()); ++i)
-                {
-                    const bool isSelected = (selectedObjectIndex == i);
-                    if (ImGui::Selectable(scene->objects[i].name.c_str(), isSelected))
-                    {
-                        selectedObjectIndex = i;
-                    }
-                    if (isSelected)
-                    {
-                        ImGui::SetItemDefaultFocus();
-                    }
-                }
-                ImGui::EndListBox();
-            }
-
-            if (selectedObjectIndex >= 0 && selectedObjectIndex < static_cast<int>(scene->objects.size()))
-            {
-                SceneObject& object = scene->objects[selectedObjectIndex];
-                ImGui::Separator();
-                ImGui::Text("Selected: %s", object.name.c_str());
-
-                glm::vec3 translation = object.translation;
-                glm::vec3 rotation = object.rotation;
-                glm::vec3 scale = object.scale;
-                bool changed = false;
-                changed |= ImGui::DragFloat3("Translate", &translation[0], 0.05f);
-                changed |= ImGui::DragFloat3("Rotate", &rotation[0], 1.0f);
-                changed |= ImGui::DragFloat3("Scale", &scale[0], 0.05f, 0.01f, 100.0f);
-
-                if (changed)
-                {
-                    applyObjectTransform(selectedObjectIndex, translation, rotation, scale);
-                }
-            }
-            else
-            {
-                ImGui::TextUnformatted("Click an object in the viewport to select it.");
-            }
-        }
-        else
-        {
-            ImGui::Text("No editable objects in scene.");
-        }
-        ImGui::End();
+        renderSceneObjectsWindow();
     }
 
     drawViewportGizmoOverlay();

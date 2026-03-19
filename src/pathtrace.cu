@@ -764,17 +764,64 @@ __device__ inline glm::vec3 sampleTexture(
         return glm::vec3(1.0f);
     }
 
-    float u = uv.x - floorf(uv.x);
-    float v = uv.y - floorf(uv.y);
-    float x = u * (texture.width - 1);
-    float y = (1.0f - v) * (texture.height - 1);
+    auto wrapCoord = [](float coord, int wrapMode) -> float
+    {
+        if (wrapMode == 33071)
+        {
+            return glm::clamp(coord, 0.0f, 1.0f);
+        }
+        if (wrapMode == 33648)
+        {
+            const float period = floorf(coord);
+            const float frac = coord - period;
+            return (static_cast<int>(period) & 1) ? (1.0f - frac) : frac;
+        }
+        return coord - floorf(coord);
+    };
 
-    int x0 = glm::clamp((int)floorf(x), 0, texture.width - 1);
-    int y0 = glm::clamp((int)floorf(y), 0, texture.height - 1);
-    int x1 = glm::clamp(x0 + 1, 0, texture.width - 1);
-    int y1 = glm::clamp(y0 + 1, 0, texture.height - 1);
-    float tx = x - x0;
-    float ty = y - y0;
+    float u = wrapCoord(uv.x, texture.wrapS);
+    float v = wrapCoord(uv.y, texture.wrapT);
+    float x = u * (texture.width - 1);
+    float y = (texture.flipV ? (1.0f - v) : v) * (texture.height - 1);
+
+    int x0 = (int)floorf(x);
+    int y0 = (int)floorf(y);
+    if (texture.wrapS == 33071)
+    {
+        x0 = glm::clamp(x0, 0, texture.width - 1);
+    }
+    else if (texture.width > 0)
+    {
+        x0 %= texture.width;
+        if (x0 < 0)
+        {
+            x0 += texture.width;
+        }
+    }
+    if (texture.wrapT == 33071)
+    {
+        y0 = glm::clamp(y0, 0, texture.height - 1);
+    }
+    else if (texture.height > 0)
+    {
+        y0 %= texture.height;
+        if (y0 < 0)
+        {
+            y0 += texture.height;
+        }
+    }
+    int x1 = x0;
+    if (texture.width > 1)
+    {
+        x1 = (texture.wrapS == 33071) ? glm::clamp(x0 + 1, 0, texture.width - 1) : ((x0 + 1) % texture.width);
+    }
+    int y1 = y0;
+    if (texture.height > 1)
+    {
+        y1 = (texture.wrapT == 33071) ? glm::clamp(y0 + 1, 0, texture.height - 1) : ((y0 + 1) % texture.height);
+    }
+    float tx = x - floorf(x);
+    float ty = y - floorf(y);
 
     const glm::vec3 c00 = texturePixels[texture.pixelOffset + y0 * texture.width + x0];
     const glm::vec3 c10 = texturePixels[texture.pixelOffset + y0 * texture.width + x1];
@@ -796,6 +843,54 @@ __device__ inline glm::vec3 evaluateMaterialColor(
         return material.color;
     }
     return material.color * sampleTexture(textures[material.textureId], intersection.uv, texturePixels);
+}
+
+__device__ inline glm::vec3 evaluateTextureOnlyColor(
+    const Material& material,
+    const ShadeableIntersection& intersection,
+    const TextureData* textures,
+    const glm::vec3* texturePixels)
+{
+    if (material.textureId < 0 || textures == nullptr || texturePixels == nullptr)
+    {
+        return glm::vec3(1.0f, 0.0f, 1.0f);
+    }
+    return sampleTexture(textures[material.textureId], intersection.uv, texturePixels);
+}
+
+__device__ inline glm::vec3 evaluateMeshUvCheckerColor(const glm::vec2& uv)
+{
+    const glm::vec2 wrapped = glm::vec2(
+        uv.x - floorf(uv.x),
+        uv.y - floorf(uv.y));
+
+    const int checkX = static_cast<int>(floorf(wrapped.x * 16.0f));
+    const int checkY = static_cast<int>(floorf(wrapped.y * 16.0f));
+    const bool odd = ((checkX + checkY) & 1) != 0;
+    return odd
+        ? glm::vec3(wrapped.x, wrapped.y, 1.0f - wrapped.x)
+        : glm::vec3(1.0f - wrapped.y, wrapped.x, wrapped.y);
+}
+
+__device__ inline glm::vec3 evaluateMeshDebugColor(
+    int renderDebugMode,
+    const Material& material,
+    const Material& shadingMaterial,
+    const ShadeableIntersection& intersection,
+    const TextureData* textures,
+    const glm::vec3* texturePixels)
+{
+    switch (renderDebugMode)
+    {
+    case RENDER_DEBUG_MESH_UV_CHECKER:
+        return evaluateMeshUvCheckerColor(intersection.uv);
+    case RENDER_DEBUG_MESH_BASE_COLOR:
+        return shadingMaterial.color;
+    case RENDER_DEBUG_MESH_TEXTURE_ONLY:
+        return evaluateTextureOnlyColor(material, intersection, textures, texturePixels);
+    default:
+        return shadingMaterial.color;
+    }
 }
 
 __device__ inline float geomEmissiveArea(const Geom& geom, const Material& material)
@@ -967,6 +1062,7 @@ __global__ void shadeMaterialPaths(
     const glm::vec3* texturePixels,
     const int* lightGeomIndices,
     int lightGeomCount,
+    int renderDebugMode,
     glm::vec3* image)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -982,6 +1078,20 @@ __global__ void shadeMaterialPaths(
             const Material& material = materials[intersection.materialId];
             Material shadingMaterial = material;
             shadingMaterial.color = evaluateMaterialColor(material, intersection, textures, texturePixels);
+
+            if (renderDebugMode != RENDER_DEBUG_NONE && intersection.geomId < 0)
+            {
+                const glm::vec3 debugColor = evaluateMeshDebugColor(
+                    renderDebugMode,
+                    material,
+                    shadingMaterial,
+                    intersection,
+                    textures,
+                    texturePixels);
+                image[pathSegment.pixelIndex] += pathSegment.color * debugColor;
+                pathSegment.remainingBounces = 0;
+                return;
+            }
 
             // If the material indicates that the object was a light, "light" the ray
             if (material.emittance > 0.0f) {
@@ -1246,6 +1356,7 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             dev_texturePixels,
             dev_lightGeomIndices,
             hst_lightGeomCount,
+            guiData ? guiData->RenderDebugModeValue : RENDER_DEBUG_NONE,
             dev_image
         );
         checkCUDAError("compute shading");

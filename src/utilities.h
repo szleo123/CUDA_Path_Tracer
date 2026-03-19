@@ -17,6 +17,14 @@
 #define MIN_INTERSECTION_T 0.0001f
 #define RAY_ORIGIN_BIAS   0.001f
 
+enum RenderDebugMode
+{
+    RENDER_DEBUG_NONE = 0,
+    RENDER_DEBUG_MESH_UV_CHECKER = 1,
+    RENDER_DEBUG_MESH_BASE_COLOR = 2,
+    RENDER_DEBUG_MESH_TEXTURE_ONLY = 3
+};
+
 class GuiDataContainer
 {
 public:
@@ -29,6 +37,7 @@ public:
         , LastSortTimeMs(0.0f)
         , LastShadeTimeMs(0.0f)
         , LastNumShadedPaths(0)
+        , RenderDebugModeValue(RENDER_DEBUG_NONE)
     {}
     int TracedDepth;
     bool UseMaterialSort;
@@ -38,6 +47,7 @@ public:
     float LastSortTimeMs;
     float LastShadeTimeMs;
     int LastNumShadedPaths;
+    int RenderDebugModeValue;
 };
 
 namespace utilityCore
