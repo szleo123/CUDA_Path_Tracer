@@ -1,0 +1,183 @@
+{
+    "Materials":
+    {
+        "key_light":
+        {
+            "TYPE":"Emitting",
+            "RGB":[1.0, 0.96, 0.90],
+            "EMITTANCE":18.0
+        },
+        "fill_light":
+        {
+            "TYPE":"Emitting",
+            "RGB":[0.72, 0.84, 1.0],
+            "EMITTANCE":2.6
+        },
+        "rim_light":
+        {
+            "TYPE":"Emitting",
+            "RGB":[1.0, 0.42, 0.25],
+            "EMITTANCE":11.0
+        },
+        "diffuse_white":
+        {
+            "TYPE":"Diffuse",
+            "RGB":[0.90, 0.90, 0.88]
+        },
+        "diffuse_red":
+        {
+            "TYPE":"Diffuse",
+            "RGB":[0.82, 0.26, 0.24]
+        },
+        "diffuse_green":
+        {
+            "TYPE":"Diffuse",
+            "RGB":[0.24, 0.72, 0.34]
+        },
+        "diffuse_warm":
+        {
+            "TYPE":"Diffuse",
+            "RGB":[0.92, 0.78, 0.62]
+        },
+        "diffuse_cool":
+        {
+            "TYPE":"Diffuse",
+            "RGB":[0.56, 0.66, 0.92]
+        },
+        "specular_white":
+        {
+            "TYPE":"Specular",
+            "RGB":[0.98, 0.98, 0.98]
+        },
+        "glass_white":
+        {
+            "TYPE":"Glass",
+            "RGB":[0.98, 0.98, 0.98],
+            "IOR":1.5
+        }
+    },
+    "Camera":  {
+                   "RES":  [
+                               800,
+                               800
+                           ],
+                   "FOVY":  45.0,
+                   "ITERATIONS":  500,
+                   "DEPTH":  16,
+                   "FILE":  "mis_validation",
+                   "EYE":  [
+                               0.0,
+                               5.0,
+                               10.5
+                           ],
+                   "LOOKAT":  [
+                                  0.0,
+                                  5.0,
+                                  0.0
+                              ],
+                   "UP":  [
+                              0.0,
+                              1.0,
+                              0.0
+                          ]
+               },
+    "Objects":
+    [
+        {
+            "NAME":"Key Light",
+            "TYPE":"cube",
+            "MATERIAL":"key_light",
+            "TRANS":[-1.8,9.7,-0.8],
+            "ROTAT":[0.0,0.0,0.0],
+            "SCALE":[1.2,0.18,1.2]
+        },
+        {
+            "NAME":"Fill Light",
+            "TYPE":"cube",
+            "MATERIAL":"fill_light",
+            "TRANS":[2.6,8.9,1.3],
+            "ROTAT":[0.0,0.0,28.0],
+            "SCALE":[3.7,0.18,3.7]
+        },
+        {
+            "NAME":"Rim Light",
+            "TYPE":"cube",
+            "MATERIAL":"rim_light",
+            "TRANS":[0.0,6.8,-4.2],
+            "ROTAT":[0.0,90.0,0.0],
+            "SCALE":[0.18,1.4,2.2]
+        },
+        {
+            "NAME":"Floor",
+            "TYPE":"cube",
+            "MATERIAL":"diffuse_white",
+            "TRANS":[0.0,0.0,0.0],
+            "ROTAT":[0.0,0.0,0.0],
+            "SCALE":[10.0,0.01,10.0]
+        },
+        {
+            "NAME":"Ceiling",
+            "TYPE":"cube",
+            "MATERIAL":"diffuse_white",
+            "TRANS":[0.0,10.0,0.0],
+            "ROTAT":[0.0,0.0,90.0],
+            "SCALE":[0.01,10.0,10.0]
+        },
+        {
+            "NAME":"Back Wall",
+            "TYPE":"cube",
+            "MATERIAL":"diffuse_white",
+            "TRANS":[0.0,5.0,-5.0],
+            "ROTAT":[0.0,90.0,0.0],
+            "SCALE":[0.01,10.0,10.0]
+        },
+        {
+            "NAME":"Left Wall",
+            "TYPE":"cube",
+            "MATERIAL":"diffuse_red",
+            "TRANS":[-5.0,5.0,0.0],
+            "ROTAT":[0.0,0.0,0.0],
+            "SCALE":[0.01,10.0,10.0]
+        },
+        {
+            "NAME":"Right Wall",
+            "TYPE":"cube",
+            "MATERIAL":"diffuse_green",
+            "TRANS":[5.0,5.0,0.0],
+            "ROTAT":[0.0,0.0,0.0],
+            "SCALE":[0.01,10.0,10.0]
+        },
+        {
+            "NAME":"Center Sphere",
+            "TYPE":"sphere",
+            "MATERIAL":"diffuse_warm",
+            "TRANS":[0.0,2.1,-0.6],
+            "ROTAT":[0.0,0.0,0.0],
+            "SCALE":[2.4,2.4,2.4]
+        },
+        {
+            "NAME":"Rear Block",
+            "TYPE":"cube",
+            "MATERIAL":"diffuse_cool",
+            "TRANS":[-2.2,2.0,-2.1],
+            "ROTAT":[0.0,18.0,0.0],
+            "SCALE":[1.8,4.0,1.8]
+        },
+        {
+            "NAME":"Mirror Sphere",
+            "TYPE":"sphere",
+            "MATERIAL":"specular_white",
+            "TRANS":[3.0,1.5,1.2],
+            "ROTAT":[0.0,0.0,0.0],
+            "SCALE":[1.8,1.8,1.8]
+        },
+        {
+            "NAME":"Glass Sphere",
+            "TYPE":"sphere",
+            "MATERIAL":"glass_white",
+            "TRANS":[-3.0,1.6,1.7],
+            "ROTAT":[0.0,0.0,0.0],
+            "SCALE":[1.9,1.9,1.9]
+        }
+    ]
+}

@@ -29,6 +29,11 @@ __host__ __device__ void computeLobeProbabilities(
     float& pReflect,
     float& pRefract);
 
+__host__ __device__ float evaluateBsdfPdf(
+    const Material& material,
+    const glm::vec3& shadingNormal,
+    const glm::vec3& wi);
+
 /**
  * Scatter a ray with some probabilities according to the material properties.
  * For example, a diffuse surface scatters in a cosine-weighted hemisphere.

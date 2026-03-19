@@ -123,6 +123,7 @@ static PathSegment* dev_paths = NULL;
 static ShadeableIntersection* dev_intersections = NULL;
 static int* dev_materialSortKeys = NULL;
 static int* dev_lightGeomIndices = NULL;
+static float* dev_geomLightSelectionPmf = NULL;
 static int hst_lightGeomCount = 0;
 static size_t dev_geomsCount = 0;
 static size_t dev_materialsCount = 0;
@@ -133,6 +134,8 @@ static size_t dev_scenePrimitiveCount = 0;
 static size_t dev_sceneBvhNodeCount = 0;
 static size_t dev_textureCount = 0;
 static size_t dev_texturePixelCount = 0;
+
+__host__ __device__ inline float geomEmissiveArea(const Geom& geom, const Material& material);
 
 template <typename T>
 void uploadVectorToDevice(T*& devicePtr, size_t& deviceCount, const std::vector<T>& hostData)
@@ -164,16 +167,37 @@ void uploadVectorToDevice(T*& devicePtr, size_t& deviceCount, const std::vector<
         "upload device buffer");
 }
 
-void uploadLightGeomIndices(const Scene* scene)
+float computeEmissiveGeomWeight(const Geom& geom, const Material& material)
+{
+    if (material.emittance <= 0.0f)
+    {
+        return 0.0f;
+    }
+
+    const glm::vec3 emittedPower = material.color * material.emittance;
+    const float luminance = 0.2126f * emittedPower.r + 0.7152f * emittedPower.g + 0.0722f * emittedPower.b;
+    return fmaxf(geomEmissiveArea(geom, material) * luminance, 0.0f);
+}
+
+void uploadLightGeomData(const Scene* scene)
 {
     std::vector<int> lightGeomIndices;
+    std::vector<float> geomLightSelectionPmf(scene->geoms.size(), 0.0f);
+    std::vector<float> lightWeights;
     lightGeomIndices.reserve(scene->geoms.size());
+    lightWeights.reserve(scene->geoms.size());
+
+    float totalWeight = 0.0f;
     for (int i = 0; i < static_cast<int>(scene->geoms.size()); ++i)
     {
         const Geom& g = scene->geoms[i];
-        if (scene->materials[g.materialid].emittance > 0.0f)
+        const Material& material = scene->materials[g.materialid];
+        const float weight = computeEmissiveGeomWeight(g, material);
+        if (weight > 0.0f)
         {
             lightGeomIndices.push_back(i);
+            lightWeights.push_back(weight);
+            totalWeight += weight;
         }
     }
 
@@ -182,14 +206,47 @@ void uploadLightGeomIndices(const Scene* scene)
         checkCUDAResult(cudaFree(dev_lightGeomIndices), "free light geom indices");
         dev_lightGeomIndices = nullptr;
     }
+    if (dev_geomLightSelectionPmf != nullptr)
+    {
+        checkCUDAResult(cudaFree(dev_geomLightSelectionPmf), "free geom light pmf");
+        dev_geomLightSelectionPmf = nullptr;
+    }
 
     hst_lightGeomCount = static_cast<int>(lightGeomIndices.size());
     if (hst_lightGeomCount > 0)
     {
+        if (totalWeight <= EPSILON)
+        {
+            const float uniformWeight = 1.0f / static_cast<float>(hst_lightGeomCount);
+            for (int lightGeomIdx : lightGeomIndices)
+            {
+                geomLightSelectionPmf[lightGeomIdx] = uniformWeight;
+            }
+        }
+        else
+        {
+            for (int i = 0; i < hst_lightGeomCount; ++i)
+            {
+                geomLightSelectionPmf[lightGeomIndices[i]] = lightWeights[i] / totalWeight;
+            }
+        }
+
         checkCUDAResult(cudaMalloc(&dev_lightGeomIndices, hst_lightGeomCount * sizeof(int)), "allocate light geom indices");
         checkCUDAResult(
             cudaMemcpy(dev_lightGeomIndices, lightGeomIndices.data(), hst_lightGeomCount * sizeof(int), cudaMemcpyHostToDevice),
             "upload light geom indices");
+    }
+
+    if (!geomLightSelectionPmf.empty())
+    {
+        checkCUDAResult(cudaMalloc(&dev_geomLightSelectionPmf, geomLightSelectionPmf.size() * sizeof(float)), "allocate geom light pmf");
+        checkCUDAResult(
+            cudaMemcpy(
+                dev_geomLightSelectionPmf,
+                geomLightSelectionPmf.data(),
+                geomLightSelectionPmf.size() * sizeof(float),
+                cudaMemcpyHostToDevice),
+            "upload geom light pmf");
     }
 }
 
@@ -230,7 +287,7 @@ void pathtraceInit(Scene* scene)
 
     cudaMalloc(&dev_intersections, pixelcount * sizeof(ShadeableIntersection));
     cudaMalloc(&dev_materialSortKeys, pixelcount * sizeof(int));
-    uploadLightGeomIndices(scene);
+    uploadLightGeomData(scene);
     scene->gpuDynamicDataDirty = false;
 
     checkCUDAError("pathtraceInit");
@@ -243,7 +300,7 @@ void pathtraceUpdateScene(Scene* scene)
     uploadVectorToDevice(dev_meshInstances, dev_meshInstanceCount, scene->meshInstances);
     uploadVectorToDevice(dev_scenePrimitives, dev_scenePrimitiveCount, scene->scenePrimitives);
     uploadVectorToDevice(dev_sceneBvhNodes, dev_sceneBvhNodeCount, scene->sceneBvhNodes);
-    uploadLightGeomIndices(scene);
+    uploadLightGeomData(scene);
     scene->gpuDynamicDataDirty = false;
     checkCUDAError("pathtraceUpdateScene");
 }
@@ -277,6 +334,7 @@ void pathtraceFree()
     cudaFree(dev_intersections);
     cudaFree(dev_materialSortKeys);
     cudaFree(dev_lightGeomIndices);
+    cudaFree(dev_geomLightSelectionPmf);
     dev_image = nullptr;
     dev_paths = nullptr;
     dev_geoms = nullptr;
@@ -291,6 +349,7 @@ void pathtraceFree()
     dev_intersections = nullptr;
     dev_materialSortKeys = nullptr;
     dev_lightGeomIndices = nullptr;
+    dev_geomLightSelectionPmf = nullptr;
     hst_lightGeomCount = 0;
     dev_geomsCount = 0;
     dev_materialsCount = 0;
@@ -900,7 +959,7 @@ __device__ inline glm::vec3 evaluateMeshDebugColor(
     }
 }
 
-__device__ inline float geomEmissiveArea(const Geom& geom, const Material& material)
+__host__ __device__ inline float geomEmissiveArea(const Geom& geom, const Material& material)
 {
     (void)material;
     if (geom.type == SPHERE)
@@ -986,15 +1045,68 @@ __device__ inline void samplePointOnCube(
     point = multiplyMV(geom.transform, glm::vec4(localPoint, 1.0f));
     normal = glm::normalize(multiplyMV(geom.invTranspose, glm::vec4(localNormal, 0.0f)));
 }
-__device__ float evaluateDiffuseBsdfPdf(
-    const Material& material,
-    const glm::vec3& shadingNormal,
-    const glm::vec3& wi)
+__device__ float evaluateLightPdf(
+    const Geom& lightGeom,
+    const Material& lightMaterial,
+    float lightSelectionPmf,
+    const glm::vec3& shadingPoint,
+    const glm::vec3& wi,
+    const glm::vec3& lightPoint,
+    const glm::vec3& lightNormal)
 {
-    float pDiffuse, pReflect, pRefract;
-    computeLobeProbabilities(material, pDiffuse, pReflect, pRefract);
-    float cosTheta = glm::max(0.0f, glm::dot(shadingNormal, wi));
-    return pDiffuse * (cosTheta / PI);
+    if (lightSelectionPmf <= 0.0f)
+    {
+        return 0.0f;
+    }
+
+    const float lightArea = geomEmissiveArea(lightGeom, lightMaterial);
+    if (lightArea <= EPSILON)
+    {
+        return 0.0f;
+    }
+
+    const glm::vec3 toLight = lightPoint - shadingPoint;
+    const float dist2 = glm::dot(toLight, toLight);
+    const float cosLight = glm::max(0.0f, glm::dot(lightNormal, -wi));
+    if (dist2 <= EPSILON || cosLight <= 0.0f)
+    {
+        return 0.0f;
+    }
+
+    return lightSelectionPmf * (dist2 / (cosLight * lightArea));
+}
+
+__device__ int sampleLightIndex(
+    thrust::default_random_engine& rng,
+    const int* lightGeomIndices,
+    const float* geomLightSelectionPmf,
+    int lightGeomCount,
+    float& outLightSelectionPmf)
+{
+    if (lightGeomCount <= 0)
+    {
+        outLightSelectionPmf = 0.0f;
+        return -1;
+    }
+
+    thrust::uniform_real_distribution<float> u01(0, 1);
+    const float xi = u01(rng);
+    float cumulative = 0.0f;
+
+    for (int i = 0; i < lightGeomCount; ++i)
+    {
+        const int geomIndex = lightGeomIndices[i];
+        const float pmf = geomLightSelectionPmf[geomIndex];
+        cumulative += pmf;
+        if (xi <= cumulative || i == lightGeomCount - 1)
+        {
+            outLightSelectionPmf = pmf;
+            return geomIndex;
+        }
+    }
+
+    outLightSelectionPmf = 0.0f;
+    return -1;
 }
 
 __device__ glm::vec3 computeShadowTransmittance(
@@ -1068,6 +1180,7 @@ __global__ void shadeMaterialPaths(
     const TextureData* textures,
     const glm::vec3* texturePixels,
     const int* lightGeomIndices,
+    const float* geomLightSelectionPmf,
     int lightGeomCount,
     int renderDebugMode,
     glm::vec3* image)
@@ -1105,13 +1218,21 @@ __global__ void shadeMaterialPaths(
                 float misWeight = 1.0f;
                 if (!pathSegment.lastBounceWasDelta && lightGeomCount > 0 && intersection.geomId >= 0) {
                     const Geom& lightGeom = geoms[intersection.geomId];
-                    float area = geomEmissiveArea(lightGeom, material);
                     glm::vec3 wi = glm::normalize(pathSegment.ray.direction);
                     float cosLight = glm::max(0.0f, glm::dot(intersection.surfaceNormal, -wi));
-                    float dist2 = intersection.t * intersection.t * glm::dot(pathSegment.ray.direction, pathSegment.ray.direction);
-                    if (area > EPSILON && cosLight > 0.0f) {
-                        float lightPdf = (dist2 / (cosLight * area)) / lightGeomCount;
-                        misWeight = powerHeuristic(pathSegment.lastBsdfPdf, lightPdf);
+                    if (cosLight > 0.0f) {
+                        const glm::vec3 lightPoint = pathSegment.ray.origin + intersection.t * pathSegment.ray.direction;
+                        const float lightPdf = evaluateLightPdf(
+                            lightGeom,
+                            material,
+                            geomLightSelectionPmf[intersection.geomId],
+                            pathSegment.ray.origin,
+                            wi,
+                            lightPoint,
+                            intersection.surfaceNormal);
+                        if (lightPdf > 0.0f) {
+                            misWeight = powerHeuristic(pathSegment.lastBsdfPdf, lightPdf);
+                        }
                     }
                 }
 
@@ -1132,14 +1253,18 @@ __global__ void shadeMaterialPaths(
                     float pDiffuse, pReflect, pRefract;
                     computeLobeProbabilities(shadingMaterial, pDiffuse, pReflect, pRefract);
                     if (pDiffuse > 0.0f) {
-                        thrust::uniform_real_distribution<float> u01(0, 1);
-                        int picked = glm::min((int)(u01(rng) * lightGeomCount), lightGeomCount - 1);
-                        int lightGeomIdx = lightGeomIndices[picked];
+                        float lightSelectionPmf = 0.0f;
+                        int lightGeomIdx = sampleLightIndex(
+                            rng,
+                            lightGeomIndices,
+                            geomLightSelectionPmf,
+                            lightGeomCount,
+                            lightSelectionPmf);
+                        if (lightGeomIdx >= 0 && lightSelectionPmf > 0.0f) {
                         const Geom& lightGeom = geoms[lightGeomIdx];
                         const Material& lightMaterial = materials[lightGeom.materialid];
-                        float lightArea = geomEmissiveArea(lightGeom, lightMaterial);
 
-                        if (lightMaterial.emittance > 0.0f && lightArea > EPSILON) {
+                        if (lightMaterial.emittance > 0.0f) {
                             glm::vec3 lightPoint;
                             glm::vec3 lightNormal;
 
@@ -1177,8 +1302,15 @@ __global__ void shadeMaterialPaths(
                                         triangleBvhNodes,
                                         triangleBvhNodeCount);
                                     if (glm::length2(shadowTransmittance) > 0.0f) {
-                                        float lightPdf = (dist2 / (cosLight * lightArea)) / lightGeomCount;
-                                        float bsdfPdf = evaluateDiffuseBsdfPdf(shadingMaterial, shadingNormal, wi);
+                                        float lightPdf = evaluateLightPdf(
+                                            lightGeom,
+                                            lightMaterial,
+                                            lightSelectionPmf,
+                                            intersect,
+                                            wi,
+                                            lightPoint,
+                                            lightNormal);
+                                        float bsdfPdf = evaluateBsdfPdf(shadingMaterial, shadingNormal, wi);
                                         float misWeight = powerHeuristic(lightPdf, bsdfPdf);
                                         glm::vec3 f = shadingMaterial.color / PI;
                                         glm::vec3 Le = lightMaterial.color * lightMaterial.emittance;
@@ -1188,6 +1320,7 @@ __global__ void shadeMaterialPaths(
                                     }
                                 }
                             }
+                        }
                         }
                     }
                 }
@@ -1362,6 +1495,7 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             dev_textures,
             dev_texturePixels,
             dev_lightGeomIndices,
+            dev_geomLightSelectionPmf,
             hst_lightGeomCount,
             guiData ? guiData->RenderDebugModeValue : RENDER_DEBUG_NONE,
             dev_image

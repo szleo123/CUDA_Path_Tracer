@@ -45,6 +45,17 @@ __host__ __device__ void computeLobeProbabilities(
     pRefract = refractiveWeight / sumWeights;
 }
 
+__host__ __device__ float evaluateBsdfPdf(
+    const Material& material,
+    const glm::vec3& shadingNormal,
+    const glm::vec3& wi)
+{
+    float pDiffuse, pReflect, pRefract;
+    computeLobeProbabilities(material, pDiffuse, pReflect, pRefract);
+    const float cosTheta = fmaxf(0.0f, glm::dot(shadingNormal, wi));
+    return pDiffuse * (cosTheta / PI);
+}
+
 __host__ __device__ glm::vec3 calculateRandomDirectionInHemisphere(
     glm::vec3 normal,
     thrust::default_random_engine &rng)
@@ -143,6 +154,6 @@ __host__ __device__ void scatterRay(
     sample.direction = calculateRandomDirectionInHemisphere(shadingNormal, rng);
     float cosTheta = fmaxf(0.0f, glm::dot(sample.direction, shadingNormal));
     sample.pathWeight = safeDivide(m.color, pDiffuse);
-    sample.pdf = pDiffuse * (cosTheta / PI);
+    sample.pdf = evaluateBsdfPdf(m, shadingNormal, sample.direction);
     sample.isDelta = 0;
 }
