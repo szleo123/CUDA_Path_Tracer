@@ -121,7 +121,9 @@ __host__ __device__ float triangleIntersectionTest(
     glm::vec3& intersectionPoint,
     glm::vec3& shadingNormal,
     glm::vec3& geometricNormal,
-    glm::vec2& uv)
+    glm::vec2& uv,
+    glm::vec3& tangent,
+    float& tangentSign)
 {
     const glm::vec3 edge1 = triangle.p1 - triangle.p0;
     const glm::vec3 edge2 = triangle.p2 - triangle.p0;
@@ -168,6 +170,28 @@ __host__ __device__ float triangleIntersectionTest(
     uv = triangle.hasUVs
         ? (w * triangle.uv0 + u * triangle.uv1 + v * triangle.uv2)
         : glm::vec2(0.0f);
+    tangent = glm::vec3(0.0f);
+    tangentSign = 1.0f;
+
+    if (triangle.hasUVs)
+    {
+        const glm::vec3 dp1 = triangle.p1 - triangle.p0;
+        const glm::vec3 dp2 = triangle.p2 - triangle.p0;
+        const glm::vec2 duv1 = triangle.uv1 - triangle.uv0;
+        const glm::vec2 duv2 = triangle.uv2 - triangle.uv0;
+        const float detUv = duv1.x * duv2.y - duv1.y * duv2.x;
+        if (fabsf(detUv) > EPSILON)
+        {
+            const float invDetUv = 1.0f / detUv;
+            const glm::vec3 derivedTangent = (dp1 * duv2.y - dp2 * duv1.y) * invDetUv;
+            const glm::vec3 derivedBitangent = (dp2 * duv1.x - dp1 * duv2.x) * invDetUv;
+            if (glm::dot(derivedTangent, derivedTangent) > EPSILON)
+            {
+                tangent = glm::normalize(derivedTangent);
+                tangentSign = glm::dot(glm::cross(geometricNormal, tangent), derivedBitangent) < 0.0f ? -1.0f : 1.0f;
+            }
+        }
+    }
 
     return t;
 }

@@ -29,8 +29,17 @@ __host__ __device__ void computeLobeProbabilities(
     float& pReflect,
     float& pRefract);
 
+__host__ __device__ bool materialHasNonDeltaBsdf(const Material& material);
+
+__host__ __device__ glm::vec3 evaluateBsdf(
+    const Material& material,
+    const glm::vec3& wo,
+    const glm::vec3& shadingNormal,
+    const glm::vec3& wi);
+
 __host__ __device__ float evaluateBsdfPdf(
     const Material& material,
+    const glm::vec3& wo,
     const glm::vec3& shadingNormal,
     const glm::vec3& wi);
 

@@ -50,9 +50,13 @@ struct Triangle
     glm::vec2 uv0;
     glm::vec2 uv1;
     glm::vec2 uv2;
+    glm::vec4 t0;
+    glm::vec4 t1;
+    glm::vec4 t2;
     int materialId;
     int hasVertexNormals;
     int hasUVs;
+    int hasVertexTangents;
 };
 
 struct TextureData
@@ -110,16 +114,20 @@ struct SceneBvhNode
 struct Material
 {
     glm::vec3 color;
-    struct
-    {
-        float exponent;
-        glm::vec3 color;
-    } specular;
+    glm::vec3 specularColor;
+    float roughness;
+    float metallic;
+    float alphaCutoff;
     float hasReflective;
     float hasRefractive;
     float indexOfRefraction;
     float emittance;
+    int alphaMode;
+    int doubleSided;
     int textureId;
+    int metallicRoughnessTextureId;
+    int normalTextureId;
+    float normalTextureScale;
 };
 
 struct Camera
@@ -163,6 +171,7 @@ struct PathSegment
     int remainingBounces;
     float lastBsdfPdf;
     int lastBounceWasDelta;
+    int ignoreTriangleIndex;
 };
 
 struct ShadeableIntersection
@@ -170,7 +179,10 @@ struct ShadeableIntersection
     float t;
     glm::vec3 surfaceNormal;
     glm::vec3 geometricNormal;
+    glm::vec3 tangent;
+    float tangentSign;
     glm::vec2 uv;
     int materialId;
+    int triangleIndex;
     int geomId;
 };

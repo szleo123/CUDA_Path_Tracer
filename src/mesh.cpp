@@ -97,8 +97,9 @@ glm::vec3 srgbToLinear(const glm::vec3& srgb)
 
 bool loadAsciiPpmImage(
     const std::filesystem::path& texturePath,
+    bool decodeSrgb,
     TextureData& outTexture,
-    std::vector<glm::vec3>& outPixels,
+    std::vector<glm::vec4>& outPixels,
     std::string& outError)
 {
     std::ifstream input(texturePath);
@@ -154,11 +155,11 @@ bool loadAsciiPpmImage(
             return false;
         }
 
-        glm::vec3 srgb(
+        glm::vec3 rgb(
             std::stoi(rToken) * invMax,
             std::stoi(gToken) * invMax,
             std::stoi(bToken) * invMax);
-        outPixels.emplace_back(srgbToLinear(srgb));
+        outPixels.emplace_back(decodeSrgb ? srgbToLinear(rgb) : rgb, 1.0f);
     }
 
     return true;
@@ -171,6 +172,7 @@ glm::mat4 nodeTransform(const tinygltf::Node& node)
         glm::mat4 matrix(1.0f);
         for (int i = 0; i < 16; ++i)
         {
+            // glTF stores matrices in column-major order, and GLM is indexed as mat[col][row].
             matrix[i / 4][i % 4] = static_cast<float>(node.matrix[i]);
         }
         return matrix;
@@ -381,6 +383,63 @@ bool readAccessorVec2(
     return true;
 }
 
+bool readAccessorVec4(
+    const tinygltf::Model& model,
+    int accessorIndex,
+    std::vector<glm::vec4>& outValues,
+    std::string& outError)
+{
+    if (accessorIndex < 0 || accessorIndex >= static_cast<int>(model.accessors.size()))
+    {
+        outError = "Invalid glTF accessor index";
+        return false;
+    }
+
+    const tinygltf::Accessor& accessor = model.accessors[accessorIndex];
+    if (accessor.bufferView < 0 || accessor.bufferView >= static_cast<int>(model.bufferViews.size()))
+    {
+        outError = "Invalid glTF accessor buffer view";
+        return false;
+    }
+    if (accessor.type != TINYGLTF_TYPE_VEC4)
+    {
+        outError = "glTF accessor is not VEC4";
+        return false;
+    }
+
+    const tinygltf::BufferView& bufferView = model.bufferViews[accessor.bufferView];
+    if (bufferView.buffer < 0 || bufferView.buffer >= static_cast<int>(model.buffers.size()))
+    {
+        outError = "Invalid glTF buffer";
+        return false;
+    }
+
+    const tinygltf::Buffer& buffer = model.buffers[bufferView.buffer];
+    const size_t componentSize = tinygltf::GetComponentSizeInBytes(accessor.componentType);
+    const size_t stride = accessor.ByteStride(bufferView);
+    const size_t offset = bufferView.byteOffset + accessor.byteOffset;
+    const size_t elementSize = componentSize * 4;
+    if (componentSize == 0 || stride < elementSize || offset + stride * accessor.count > buffer.data.size() + (stride - elementSize))
+    {
+        outError = "glTF VEC4 accessor out of range";
+        return false;
+    }
+
+    outValues.resize(accessor.count);
+    const unsigned char* base = buffer.data.data() + offset;
+    for (size_t i = 0; i < accessor.count; ++i)
+    {
+        const unsigned char* element = base + i * stride;
+        outValues[i] = glm::vec4(
+            componentToFloat(element + componentSize * 0, accessor.componentType, accessor.normalized),
+            componentToFloat(element + componentSize * 1, accessor.componentType, accessor.normalized),
+            componentToFloat(element + componentSize * 2, accessor.componentType, accessor.normalized),
+            componentToFloat(element + componentSize * 3, accessor.componentType, accessor.normalized));
+    }
+
+    return true;
+}
+
 bool readIndices(
     const tinygltf::Model& model,
     int accessorIndex,
@@ -456,6 +515,9 @@ void appendTriangle(
     const glm::vec2* uv0,
     const glm::vec2* uv1,
     const glm::vec2* uv2,
+    const glm::vec4* t0,
+    const glm::vec4* t1,
+    const glm::vec4* t2,
     int materialId,
     std::vector<Triangle>& outTriangles)
 {
@@ -476,6 +538,29 @@ void appendTriangle(
     tri.uv1 = uv1 ? *uv1 : glm::vec2(0.0f);
     tri.uv2 = uv2 ? *uv2 : glm::vec2(0.0f);
     tri.hasUVs = (uv0 && uv1 && uv2) ? 1 : 0;
+    tri.t0 = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+    tri.t1 = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+    tri.t2 = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+    tri.hasVertexTangents = 0;
+    if (t0 && t1 && t2)
+    {
+        const float handednessFlip = glm::determinant(glm::mat3(transform)) < 0.0f ? -1.0f : 1.0f;
+        auto transformTangent = [&](const glm::vec4& tangent) -> glm::vec4
+        {
+            const glm::vec3 worldTangent = glm::vec3(transform * glm::vec4(glm::vec3(tangent), 0.0f));
+            const float tangentLength2 = glm::dot(worldTangent, worldTangent);
+            if (tangentLength2 <= 1e-12f)
+            {
+                return glm::vec4(0.0f, 0.0f, 0.0f, tangent.w * handednessFlip);
+            }
+            return glm::vec4(glm::normalize(worldTangent), tangent.w * handednessFlip);
+        };
+
+        tri.t0 = transformTangent(*t0);
+        tri.t1 = transformTangent(*t1);
+        tri.t2 = transformTangent(*t2);
+        tri.hasVertexTangents = 1;
+    }
 
     outTriangles.push_back(tri);
 }
@@ -507,25 +592,93 @@ int ensureMaterialDefinition(
     const tinygltf::Material& src = model.materials[gltfMaterialIndex];
     MeshMaterialDefinition material{};
     material.name = src.name.empty() ? ("material_" + std::to_string(gltfMaterialIndex)) : src.name;
-
-    const auto& baseColorFactor = src.pbrMetallicRoughness.baseColorFactor;
-    if (baseColorFactor.size() >= 3)
+    material.alphaMode = 0;
+    if (src.alphaMode == "MASK")
     {
-        material.diffuseColor = glm::vec3(
-            static_cast<float>(baseColorFactor[0]),
-            static_cast<float>(baseColorFactor[1]),
-            static_cast<float>(baseColorFactor[2]));
+        material.alphaMode = 1;
+    }
+    else if (src.alphaMode == "BLEND")
+    {
+        material.alphaMode = 2;
+    }
+    material.alphaCutoff = static_cast<float>(src.alphaCutoff);
+    material.doubleSided = src.doubleSided ? 1 : 0;
+
+    int diffuseTextureIndex = -1;
+    int diffuseTexcoordSet = 0;
+    int normalTextureIndex = -1;
+
+    if (src.extensions.find("KHR_materials_pbrSpecularGlossiness") != src.extensions.end())
+    {
+        const tinygltf::Value& ext = src.extensions.at("KHR_materials_pbrSpecularGlossiness");
+        if (ext.IsObject())
+        {
+            if (ext.Has("diffuseFactor"))
+            {
+                const tinygltf::Value& diffuseFactor = ext.Get("diffuseFactor");
+                if (diffuseFactor.IsArray() && diffuseFactor.ArrayLen() >= 3)
+                {
+                    material.diffuseColor = glm::vec3(
+                        static_cast<float>(diffuseFactor.Get(0).GetNumberAsDouble()),
+                        static_cast<float>(diffuseFactor.Get(1).GetNumberAsDouble()),
+                        static_cast<float>(diffuseFactor.Get(2).GetNumberAsDouble()));
+                }
+            }
+            if (ext.Has("specularFactor"))
+            {
+                const tinygltf::Value& specularFactor = ext.Get("specularFactor");
+                if (specularFactor.IsArray() && specularFactor.ArrayLen() >= 3)
+                {
+                    material.specularColor = glm::vec3(
+                        static_cast<float>(specularFactor.Get(0).GetNumberAsDouble()),
+                        static_cast<float>(specularFactor.Get(1).GetNumberAsDouble()),
+                        static_cast<float>(specularFactor.Get(2).GetNumberAsDouble()));
+                }
+            }
+            if (ext.Has("glossinessFactor"))
+            {
+                const float glossiness = static_cast<float>(ext.Get("glossinessFactor").GetNumberAsDouble());
+                material.roughnessFactor = glm::clamp(1.0f - glossiness, 0.0f, 1.0f);
+            }
+            material.metallicFactor = 0.0f;
+
+            if (ext.Has("diffuseTexture"))
+            {
+                const tinygltf::Value& diffuseTexture = ext.Get("diffuseTexture");
+                if (diffuseTexture.IsObject() && diffuseTexture.Has("index"))
+                {
+                    diffuseTextureIndex = diffuseTexture.Get("index").GetNumberAsInt();
+                    diffuseTexcoordSet = diffuseTexture.Has("texCoord")
+                        ? diffuseTexture.Get("texCoord").GetNumberAsInt()
+                        : 0;
+                }
+            }
+        }
+    }
+    else
+    {
+        const auto& baseColorFactor = src.pbrMetallicRoughness.baseColorFactor;
+        if (baseColorFactor.size() >= 3)
+        {
+            material.diffuseColor = glm::vec3(
+                static_cast<float>(baseColorFactor[0]),
+                static_cast<float>(baseColorFactor[1]),
+                static_cast<float>(baseColorFactor[2]));
+        }
+        material.metallicFactor = static_cast<float>(src.pbrMetallicRoughness.metallicFactor);
+        material.roughnessFactor = static_cast<float>(src.pbrMetallicRoughness.roughnessFactor);
+        diffuseTextureIndex = src.pbrMetallicRoughness.baseColorTexture.index;
+        diffuseTexcoordSet = src.pbrMetallicRoughness.baseColorTexture.texCoord;
     }
 
-    const tinygltf::TextureInfo& textureInfo = src.pbrMetallicRoughness.baseColorTexture;
-    material.diffuseTexcoordSet = textureInfo.texCoord;
+    material.diffuseTexcoordSet = diffuseTexcoordSet;
     material.flipV = false;
     material.wrapS = kWrapRepeat;
     material.wrapT = kWrapRepeat;
 
-    if (textureInfo.index >= 0 && textureInfo.index < static_cast<int>(model.textures.size()))
+    if (diffuseTextureIndex >= 0 && diffuseTextureIndex < static_cast<int>(model.textures.size()))
     {
-        const tinygltf::Texture& texture = model.textures[textureInfo.index];
+        const tinygltf::Texture& texture = model.textures[diffuseTextureIndex];
         if (texture.sampler >= 0 && texture.sampler < static_cast<int>(model.samplers.size()))
         {
             const tinygltf::Sampler& sampler = model.samplers[texture.sampler];
@@ -545,6 +698,47 @@ int ensureMaterialDefinition(
                 material.diffuseTexturePath = image.uri;
             }
             material.diffuseTextureKey = "gltf_image_" + std::to_string(texture.source);
+        }
+    }
+
+    const tinygltf::TextureInfo& metallicRoughnessInfo = src.pbrMetallicRoughness.metallicRoughnessTexture;
+    material.metallicRoughnessTexcoordSet = metallicRoughnessInfo.texCoord;
+    if (metallicRoughnessInfo.index >= 0 && metallicRoughnessInfo.index < static_cast<int>(model.textures.size()))
+    {
+        const tinygltf::Texture& texture = model.textures[metallicRoughnessInfo.index];
+        if (texture.source >= 0 && texture.source < static_cast<int>(model.images.size()))
+        {
+            const tinygltf::Image& image = model.images[texture.source];
+            if (!image.image.empty())
+            {
+                material.metallicRoughnessTextureBytes = image.image;
+            }
+            if (!image.uri.empty())
+            {
+                material.metallicRoughnessTexturePath = image.uri;
+            }
+            material.metallicRoughnessTextureKey = "gltf_image_" + std::to_string(texture.source);
+        }
+    }
+
+    normalTextureIndex = src.normalTexture.index;
+    material.normalTexcoordSet = src.normalTexture.texCoord;
+    material.normalTextureScale = static_cast<float>(src.normalTexture.scale);
+    if (normalTextureIndex >= 0 && normalTextureIndex < static_cast<int>(model.textures.size()))
+    {
+        const tinygltf::Texture& texture = model.textures[normalTextureIndex];
+        if (texture.source >= 0 && texture.source < static_cast<int>(model.images.size()))
+        {
+            const tinygltf::Image& image = model.images[texture.source];
+            if (!image.image.empty())
+            {
+                material.normalTextureBytes = image.image;
+            }
+            if (!image.uri.empty())
+            {
+                material.normalTexturePath = image.uri;
+            }
+            material.normalTextureKey = "gltf_image_" + std::to_string(texture.source);
         }
     }
 
@@ -600,6 +794,7 @@ bool appendNodeMesh(
             std::vector<glm::vec3> positions;
             std::vector<glm::vec3> normals;
             std::vector<glm::vec2> texcoords;
+            std::vector<glm::vec4> tangents;
             std::vector<uint32_t> indices;
 
             if (!readAccessorVec3(model, posIt->second, positions, outError))
@@ -610,6 +805,13 @@ bool appendNodeMesh(
             auto normalIt = primitive.attributes.find("NORMAL");
             if (normalIt != primitive.attributes.end()
                 && !readAccessorVec3(model, normalIt->second, normals, outError))
+            {
+                return false;
+            }
+
+            auto tangentIt = primitive.attributes.find("TANGENT");
+            if (tangentIt != primitive.attributes.end()
+                && !readAccessorVec4(model, tangentIt->second, tangents, outError))
             {
                 return false;
             }
@@ -665,6 +867,9 @@ bool appendNodeMesh(
                 const glm::vec2* uv0 = (i0 < texcoords.size()) ? &texcoords[i0] : nullptr;
                 const glm::vec2* uv1 = (i1 < texcoords.size()) ? &texcoords[i1] : nullptr;
                 const glm::vec2* uv2 = (i2 < texcoords.size()) ? &texcoords[i2] : nullptr;
+                const glm::vec4* t0 = (i0 < tangents.size()) ? &tangents[i0] : nullptr;
+                const glm::vec4* t1 = (i1 < tangents.size()) ? &tangents[i1] : nullptr;
+                const glm::vec4* t2 = (i2 < tangents.size()) ? &tangents[i2] : nullptr;
 
                 appendTriangle(
                     worldTransform,
@@ -678,6 +883,9 @@ bool appendNodeMesh(
                     uv0,
                     uv1,
                     uv2,
+                    t0,
+                    t1,
+                    t2,
                     materialIndex,
                     outTriangles);
             }
@@ -777,6 +985,14 @@ bool loadGltfMesh(
         {
             material.diffuseTexturePath = meshPath.parent_path() / material.diffuseTexturePath;
         }
+        if (!material.metallicRoughnessTexturePath.empty())
+        {
+            material.metallicRoughnessTexturePath = meshPath.parent_path() / material.metallicRoughnessTexturePath;
+        }
+        if (!material.normalTexturePath.empty())
+        {
+            material.normalTexturePath = meshPath.parent_path() / material.normalTexturePath;
+        }
     };
 
     if (model.defaultScene >= 0 && model.defaultScene < static_cast<int>(model.scenes.size()))
@@ -828,14 +1044,15 @@ bool loadGltfMesh(
 bool loadTextureImage(
     const std::filesystem::path& texturePath,
     bool flipV,
+    bool decodeSrgb,
     TextureData& outTexture,
-    std::vector<glm::vec3>& outPixels,
+    std::vector<glm::vec4>& outPixels,
     std::string& outError)
 {
     int width = 0;
     int height = 0;
     int channels = 0;
-    stbi_uc* data = stbi_load(texturePath.string().c_str(), &width, &height, &channels, 3);
+    stbi_uc* data = stbi_load(texturePath.string().c_str(), &width, &height, &channels, 4);
     if (data)
     {
         outTexture.width = width;
@@ -848,18 +1065,18 @@ bool loadTextureImage(
 
         for (int i = 0; i < width * height; ++i)
         {
-            const int base = i * 3;
-            const glm::vec3 srgb(
+            const int base = i * 4;
+            const glm::vec3 rgb(
                 data[base + 0] / 255.0f,
                 data[base + 1] / 255.0f,
                 data[base + 2] / 255.0f);
-            outPixels.emplace_back(srgbToLinear(srgb));
+            outPixels.emplace_back(decodeSrgb ? srgbToLinear(rgb) : rgb, data[base + 3] / 255.0f);
         }
         stbi_image_free(data);
         return true;
     }
 
-    if (loadAsciiPpmImage(texturePath, outTexture, outPixels, outError))
+    if (loadAsciiPpmImage(texturePath, decodeSrgb, outTexture, outPixels, outError))
     {
         outTexture.flipV = flipV ? 1 : 0;
         return true;
@@ -873,14 +1090,15 @@ bool loadTextureImageFromMemory(
     const unsigned char* textureBytes,
     size_t textureByteCount,
     bool flipV,
+    bool decodeSrgb,
     TextureData& outTexture,
-    std::vector<glm::vec3>& outPixels,
+    std::vector<glm::vec4>& outPixels,
     std::string& outError)
 {
     int width = 0;
     int height = 0;
     int channels = 0;
-    stbi_uc* data = stbi_load_from_memory(textureBytes, static_cast<int>(textureByteCount), &width, &height, &channels, 3);
+    stbi_uc* data = stbi_load_from_memory(textureBytes, static_cast<int>(textureByteCount), &width, &height, &channels, 4);
     if (!data)
     {
         outError = "Failed to decode embedded texture image";
@@ -896,12 +1114,12 @@ bool loadTextureImageFromMemory(
     outPixels.reserve(outPixels.size() + width * height);
     for (int i = 0; i < width * height; ++i)
     {
-        const int base = i * 3;
-        const glm::vec3 srgb(
+        const int base = i * 4;
+        const glm::vec3 rgb(
             data[base + 0] / 255.0f,
             data[base + 1] / 255.0f,
             data[base + 2] / 255.0f);
-        outPixels.emplace_back(srgbToLinear(srgb));
+        outPixels.emplace_back(decodeSrgb ? srgbToLinear(rgb) : rgb, data[base + 3] / 255.0f);
     }
     stbi_image_free(data);
     return true;
@@ -911,7 +1129,7 @@ bool loadHdrImage(
     const std::filesystem::path& texturePath,
     bool flipV,
     TextureData& outTexture,
-    std::vector<glm::vec3>& outPixels,
+    std::vector<glm::vec4>& outPixels,
     std::string& outError)
 {
     int width = 0;
@@ -938,7 +1156,8 @@ bool loadHdrImage(
         outPixels.emplace_back(
             glm::max(data[base + 0], 0.0f),
             glm::max(data[base + 1], 0.0f),
-            glm::max(data[base + 2], 0.0f));
+            glm::max(data[base + 2], 0.0f),
+            1.0f);
     }
 
     stbi_image_free(data);

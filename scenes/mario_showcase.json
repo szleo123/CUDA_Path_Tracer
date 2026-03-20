@@ -2,7 +2,7 @@
     "Environment":
     {
         "TYPE": "HDR",
-        "FILE": "../assets/hdrs/grasslands_sunset_4k.hdr",
+        "FILE": "../assets/hdrs/interior_atelier_soft_daylight.hdr",
         "INTENSITY": 1.0,
         "ROTATION": 0.0
     }, 
@@ -54,7 +54,9 @@
                                                          0.98,
                                                          0.98,
                                                          0.98
-                                                     ]
+                                                     ], 
+                                            "ROUGHNESS": 0.2,
+                                            "METALLIC": 0.2
                                          },
                       "glass_white":  {
                                           "TYPE":  "Glass",

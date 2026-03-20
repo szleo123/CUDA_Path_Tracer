@@ -17,6 +17,7 @@ struct SceneObject
     std::string name;
     SceneObjectType type;
     int materialId;
+    std::vector<int> usedMaterialIds;
     glm::vec3 translation;
     glm::vec3 rotation;
     glm::vec3 scale;
@@ -44,6 +45,10 @@ public:
         const glm::vec3& translation,
         const glm::vec3& rotation,
         const glm::vec3& scale);
+    void updateObjectMaterialProperties(
+        size_t objectIndex,
+        float roughness,
+        float metallic);
 
     std::vector<SceneObject> objects;
     std::vector<Geom> geoms;
@@ -54,7 +59,7 @@ public:
     std::vector<SceneBvhNode> sceneBvhNodes;
     std::vector<Material> materials;
     std::vector<TextureData> textures;
-    std::vector<glm::vec3> texturePixels;
+    std::vector<glm::vec4> texturePixels;
     RenderState state;
     bool gpuDynamicDataDirty = true;
 };

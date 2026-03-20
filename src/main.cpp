@@ -42,6 +42,10 @@ static bool camchanged = true;
 float zoom, theta, phi;
 glm::vec3 cameraPosition;
 glm::vec3 ogLookAt; // for recentering the camera
+float defaultZoom = 1.0f;
+float defaultTheta = 1.0f;
+float defaultPhi = 0.0f;
+glm::vec3 defaultLookAt(0.0f);
 
 Scene* scene;
 GuiDataContainer* guiData;
@@ -61,6 +65,11 @@ GuiDataContainer* imguiData = NULL;
 ImGuiIO* io = nullptr;
 bool mouseOverImGuiWindow = false;
 static int selectedObjectIndex = -1;
+static float rightSidebarWidth = 380.0f;
+static float renderViewportWindowWidth = 0.0f;
+static float renderViewportWindowHeight = 0.0f;
+static int renderViewportFramebufferWidth = 0;
+static int renderViewportFramebufferHeight = 0;
 
 enum class TransformMode
 {
@@ -90,6 +99,190 @@ void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods);
 namespace
 {
 void applyObjectTransform(int objectIndex, const glm::vec3& translation, const glm::vec3& rotation, const glm::vec3& scale);
+void applyObjectMaterialProperties(int objectIndex, float roughness, float metallic);
+
+bool isInspectorVisible()
+{
+    return showAnalyticsWindow || showSceneObjectsWindow;
+}
+
+float getActiveSidebarWidth()
+{
+    if (!isInspectorVisible() || io == nullptr)
+    {
+        return 0.0f;
+    }
+
+    return glm::clamp(rightSidebarWidth, 280.0f, io->DisplaySize.x * 0.5f);
+}
+
+void updateRenderViewportLayout()
+{
+    int windowWidth = 0;
+    int windowHeight = 0;
+    glfwGetWindowSize(window, &windowWidth, &windowHeight);
+
+    const int targetWindowWidth = width + static_cast<int>(std::round(getActiveSidebarWidth()));
+    const int targetWindowHeight = height;
+    if (windowWidth != targetWindowWidth || windowHeight != targetWindowHeight)
+    {
+        glfwSetWindowSize(window, targetWindowWidth, targetWindowHeight);
+        windowWidth = targetWindowWidth;
+        windowHeight = targetWindowHeight;
+    }
+
+    int framebufferWidth = 0;
+    int framebufferHeight = 0;
+    glfwGetFramebufferSize(window, &framebufferWidth, &framebufferHeight);
+
+    renderViewportWindowWidth = static_cast<float>(width);
+    renderViewportWindowHeight = static_cast<float>(height);
+
+    const float framebufferScaleX = (windowWidth > 0) ? (static_cast<float>(framebufferWidth) / static_cast<float>(windowWidth)) : 1.0f;
+    const float framebufferScaleY = (windowHeight > 0) ? (static_cast<float>(framebufferHeight) / static_cast<float>(windowHeight)) : 1.0f;
+    renderViewportFramebufferWidth = static_cast<int>(glm::max(1.0f, static_cast<float>(width) * framebufferScaleX));
+    renderViewportFramebufferHeight = static_cast<int>(glm::max(1.0f, static_cast<float>(height) * framebufferScaleY));
+}
+
+bool mapWindowToRenderPixel(double xpos, double ypos, float& renderX, float& renderY)
+{
+    if (renderViewportWindowWidth <= 1.0f || renderViewportWindowHeight <= 1.0f)
+    {
+        return false;
+    }
+
+    if (xpos < 0.0 || ypos < 0.0 || xpos >= renderViewportWindowWidth || ypos >= renderViewportWindowHeight)
+    {
+        return false;
+    }
+
+    const float normalizedX = static_cast<float>(xpos) / renderViewportWindowWidth;
+    const float normalizedY = static_cast<float>(ypos) / renderViewportWindowHeight;
+    renderX = normalizedX * static_cast<float>(width);
+    renderY = normalizedY * static_cast<float>(height);
+    return true;
+}
+
+bool isEditableSurfaceMaterial(const Material& material)
+{
+    return material.emittance <= 0.0f
+        && material.hasRefractive <= 0.0f
+        && material.hasReflective > 0.0f;
+}
+
+bool findEditableObjectMaterialRange(const SceneObject& object, float& roughness, float& metallic)
+{
+    bool foundMaterial = false;
+    for (const int materialId : object.usedMaterialIds)
+    {
+        if (materialId < 0 || materialId >= static_cast<int>(scene->materials.size()))
+        {
+            continue;
+        }
+
+        const Material& material = scene->materials[materialId];
+        if (!isEditableSurfaceMaterial(material))
+        {
+            continue;
+        }
+
+        if (!foundMaterial)
+        {
+            roughness = material.roughness;
+            metallic = material.metallic;
+            foundMaterial = true;
+        }
+    }
+
+    return foundMaterial;
+}
+
+void computeObjectLocalBounds(const SceneObject& object, glm::vec3& outMin, glm::vec3& outMax)
+{
+    if (object.type == SceneObjectType::Mesh && object.triangleCount > 0)
+    {
+        outMin = object.localBboxMin;
+        outMax = object.localBboxMax;
+        return;
+    }
+
+    outMin = glm::vec3(-0.5f);
+    outMax = glm::vec3(0.5f);
+}
+
+void computeObjectWorldBounds(const SceneObject& object, glm::vec3& outMin, glm::vec3& outMax)
+{
+    glm::vec3 localMin(0.0f);
+    glm::vec3 localMax(0.0f);
+    computeObjectLocalBounds(object, localMin, localMax);
+
+    const glm::mat4 transform = utilityCore::buildTransformationMatrix(
+        object.translation,
+        object.rotation,
+        object.scale);
+
+    outMin = glm::vec3(FLT_MAX);
+    outMax = glm::vec3(-FLT_MAX);
+
+    for (int x = 0; x < 2; ++x)
+    {
+        for (int y = 0; y < 2; ++y)
+        {
+            for (int z = 0; z < 2; ++z)
+            {
+                const glm::vec3 localPoint(
+                    x ? localMax.x : localMin.x,
+                    y ? localMax.y : localMin.y,
+                    z ? localMax.z : localMin.z);
+                const glm::vec3 worldPoint = glm::vec3(transform * glm::vec4(localPoint, 1.0f));
+                outMin = glm::min(outMin, worldPoint);
+                outMax = glm::max(outMax, worldPoint);
+            }
+        }
+    }
+}
+
+void resetCameraToSceneDefault()
+{
+    renderState = &scene->state;
+    Camera& cam = renderState->camera;
+    phi = defaultPhi;
+    theta = defaultTheta;
+    zoom = defaultZoom;
+    ogLookAt = defaultLookAt;
+    cam.lookAt = defaultLookAt;
+    camchanged = true;
+    iteration = 0;
+}
+
+void frameSelectedObject()
+{
+    if (scene == nullptr || selectedObjectIndex < 0 || selectedObjectIndex >= static_cast<int>(scene->objects.size()))
+    {
+        return;
+    }
+
+    const SceneObject& object = scene->objects[selectedObjectIndex];
+    glm::vec3 bboxMin(0.0f);
+    glm::vec3 bboxMax(0.0f);
+    computeObjectWorldBounds(object, bboxMin, bboxMax);
+    const glm::vec3 center = 0.5f * (bboxMin + bboxMax);
+    const glm::vec3 extent = 0.5f * (bboxMax - bboxMin);
+    const float radius = glm::max(glm::length(extent), 0.5f);
+
+    renderState = &scene->state;
+    const Camera& cam = renderState->camera;
+    const float fovyRadians = cam.fov.y * (PI / 180.0f);
+    const float fitDistance = radius / tanf(glm::max(fovyRadians * 0.5f, 0.15f));
+
+    phi = defaultPhi;
+    theta = defaultTheta;
+    ogLookAt = center;
+    renderState->camera.lookAt = center;
+    zoom = glm::max(fitDistance * 1.35f, 1.0f);
+    camchanged = true;
+    iteration = 0;
+}
 
 const char* getRenderDebugModeLabel(int mode)
 {
@@ -178,10 +371,8 @@ void renderMainMenuBar()
     ImGui::EndMainMenuBar();
 }
 
-void renderAnalyticsWindow()
+void renderAnalyticsSection()
 {
-    ImGui::Begin("Path Tracer Analytics", &showAnalyticsWindow);
-
     if (ImGui::Checkbox("Sort by Material", &imguiData->UseMaterialSort))
     {
         iteration = 0;
@@ -227,12 +418,10 @@ void renderAnalyticsWindow()
     ImGui::Text("Last Shade Time %.3f ms", imguiData->LastShadeTimeMs);
     ImGui::Text("Last Shaded Paths %d", imguiData->LastNumShadedPaths);
     ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
-    ImGui::End();
 }
 
-void renderSceneObjectsWindow()
+void renderSceneObjectsSection()
 {
-    ImGui::Begin("Scene Objects", &showSceneObjectsWindow);
     ImGui::Text("Mode: %s", getTransformModeLabel(activeTransformMode));
     transformModeButton("Translate", TransformMode::Translate);
     ImGui::SameLine();
@@ -248,7 +437,6 @@ void renderSceneObjectsWindow()
     if (scene->objects.empty())
     {
         ImGui::Text("No editable objects in scene.");
-        ImGui::End();
         return;
     }
 
@@ -272,13 +460,21 @@ void renderSceneObjectsWindow()
     if (selectedObjectIndex < 0 || selectedObjectIndex >= static_cast<int>(scene->objects.size()))
     {
         ImGui::TextUnformatted("Click an object in the viewport to select it.");
-        ImGui::End();
         return;
     }
 
     SceneObject& object = scene->objects[selectedObjectIndex];
     ImGui::Separator();
     ImGui::Text("Selected: %s", object.name.c_str());
+    if (ImGui::Button("Frame Selected"))
+    {
+        frameSelectedObject();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Reset Camera"))
+    {
+        resetCameraToSceneDefault();
+    }
 
     glm::vec3 translation = object.translation;
     glm::vec3 rotation = object.rotation;
@@ -291,6 +487,80 @@ void renderSceneObjectsWindow()
     if (changed)
     {
         applyObjectTransform(selectedObjectIndex, translation, rotation, scale);
+    }
+
+    float roughness = 0.0f;
+    float metallic = 0.0f;
+    if (findEditableObjectMaterialRange(object, roughness, metallic))
+    {
+        ImGui::Separator();
+        ImGui::TextUnformatted("Material");
+
+        bool materialChanged = false;
+        materialChanged |= ImGui::SliderFloat("Roughness", &roughness, 0.0f, 1.0f);
+        materialChanged |= ImGui::SliderFloat("Metallic", &metallic, 0.0f, 1.0f);
+
+        if (materialChanged)
+        {
+            applyObjectMaterialProperties(selectedObjectIndex, roughness, metallic);
+        }
+    }
+    else
+    {
+        ImGui::Separator();
+        ImGui::TextUnformatted("Material controls are available for reflective non-light objects.");
+    }
+}
+
+void renderRightSidebar()
+{
+    if (!isInspectorVisible())
+    {
+        return;
+    }
+
+    const float menuBarHeight = ImGui::GetFrameHeight();
+    const ImVec2 displaySize = ImGui::GetIO().DisplaySize;
+    const float sidebarWidth = getActiveSidebarWidth();
+    const ImVec2 sidebarPos(renderViewportWindowWidth, menuBarHeight);
+    const ImVec2 sidebarSize(sidebarWidth, displaySize.y - menuBarHeight);
+
+    ImGui::SetNextWindowPos(sidebarPos, ImGuiCond_Always);
+    ImGui::SetNextWindowSize(sidebarSize, ImGuiCond_Always);
+    const ImGuiWindowFlags flags =
+        ImGuiWindowFlags_NoMove
+        | ImGuiWindowFlags_NoResize
+        | ImGuiWindowFlags_NoCollapse;
+
+    ImGui::Begin("Inspector", nullptr, flags);
+    ImGui::SetNextItemWidth(-1.0f);
+    ImGui::SliderFloat("Sidebar Width", &rightSidebarWidth, 280.0f, 520.0f, "%.0f px");
+    ImGui::Separator();
+
+    if (!showAnalyticsWindow && !showSceneObjectsWindow)
+    {
+        ImGui::TextUnformatted("Enable Analytics or Scene Objects from the View menu.");
+    }
+
+    if (showAnalyticsWindow)
+    {
+        if (ImGui::CollapsingHeader("Path Tracer Analytics", ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            renderAnalyticsSection();
+        }
+    }
+
+    if (showSceneObjectsWindow)
+    {
+        if (showAnalyticsWindow)
+        {
+            ImGui::Separator();
+        }
+
+        if (ImGui::CollapsingHeader("Scene Objects", ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            renderSceneObjectsSection();
+        }
     }
 
     ImGui::End();
@@ -331,9 +601,19 @@ Ray buildCameraRay(double xpos, double ypos)
     syncCameraState();
 
     const Camera& cam = renderState->camera;
-    const float viewportX = static_cast<float>(cam.resolution.x) - 1.0f - static_cast<float>(xpos);
+    float renderX = 0.0f;
+    float renderY = 0.0f;
+    if (!mapWindowToRenderPixel(xpos, ypos, renderX, renderY))
+    {
+        Ray invalidRay{};
+        invalidRay.origin = cam.position;
+        invalidRay.direction = glm::vec3(0.0f);
+        return invalidRay;
+    }
+
+    const float viewportX = static_cast<float>(cam.resolution.x) - 1.0f - renderX;
     const float sx = viewportX - static_cast<float>(cam.resolution.x) * 0.5f;
-    const float sy = static_cast<float>(ypos) - static_cast<float>(cam.resolution.y) * 0.5f;
+    const float sy = renderY - static_cast<float>(cam.resolution.y) * 0.5f;
 
     Ray ray;
     ray.origin = cam.position;
@@ -425,7 +705,7 @@ bool traverseTriangleBvhForPicking(
     }
 
     const Ray localRay = transformRayForPicking(worldRay, meshInstance.inverseTransform);
-    constexpr int kMaxBvhStackSize = 64;
+    constexpr int kMaxBvhStackSize = 256;
     const float maxFloat = std::numeric_limits<float>::max();
     int stack[kMaxBvhStackSize];
     int stackSize = 0;
@@ -451,13 +731,17 @@ bool traverseTriangleBvhForPicking(
                 glm::vec3 shadingNormal;
                 glm::vec3 geometricNormal;
                 glm::vec2 uv;
+                glm::vec3 tangent;
+                float tangentSign = 1.0f;
                 const float localT = triangleIntersectionTest(
                     triangle,
                     localRay,
                     intersectionPoint,
                     shadingNormal,
                     geometricNormal,
-                    uv);
+                    uv,
+                    tangent,
+                    tangentSign);
                 if (localT <= MIN_INTERSECTION_T)
                 {
                     continue;
@@ -527,6 +811,10 @@ int pickSceneObject(double xpos, double ypos)
     }
 
     const Ray ray = buildCameraRay(xpos, ypos);
+    if (glm::dot(ray.direction, ray.direction) <= 0.0f)
+    {
+        return -1;
+    }
     float closestT = std::numeric_limits<float>::max();
     int pickedIndex = -1;
 
@@ -535,7 +823,7 @@ int pickSceneObject(double xpos, double ypos)
         return -1;
     }
 
-    constexpr int kMaxBvhStackSize = 64;
+    constexpr int kMaxBvhStackSize = 256;
     int stack[kMaxBvhStackSize];
     int stackSize = 0;
     stack[stackSize++] = 0;
@@ -645,6 +933,21 @@ void applyObjectTransform(int objectIndex, const glm::vec3& translation, const g
     renderState = &scene->state;
 }
 
+void applyObjectMaterialProperties(int objectIndex, float roughness, float metallic)
+{
+    if (scene == nullptr)
+    {
+        return;
+    }
+
+    scene->updateObjectMaterialProperties(
+        static_cast<size_t>(objectIndex),
+        glm::clamp(roughness, 0.0f, 1.0f),
+        glm::clamp(metallic, 0.0f, 1.0f));
+    iteration = 0;
+    renderState = &scene->state;
+}
+
 void applyViewportManipulation(double xpos, double ypos)
 {
     if (!objectManipulationActive
@@ -693,6 +996,11 @@ bool projectWorldToViewport(const glm::vec3& worldPoint, ImVec2& screenPoint)
 {
     syncCameraState();
     const Camera& cam = renderState->camera;
+    if (renderViewportWindowWidth <= 1.0f || renderViewportWindowHeight <= 1.0f)
+    {
+        return false;
+    }
+
     const glm::vec3 toPoint = worldPoint - cam.position;
     const float depth = glm::dot(toPoint, cam.view);
     if (depth <= 0.001f)
@@ -705,8 +1013,10 @@ bool projectWorldToViewport(const glm::vec3& worldPoint, ImVec2& screenPoint)
     const float unmirroredX = sx + static_cast<float>(cam.resolution.x) * 0.5f;
     const float mirroredX = static_cast<float>(cam.resolution.x) - 1.0f - unmirroredX;
     const float viewportY = sy + static_cast<float>(cam.resolution.y) * 0.5f;
+    const float windowX = (mirroredX / static_cast<float>(cam.resolution.x)) * renderViewportWindowWidth;
+    const float windowY = (viewportY / static_cast<float>(cam.resolution.y)) * renderViewportWindowHeight;
 
-    screenPoint = ImVec2(mirroredX, viewportY);
+    screenPoint = ImVec2(windowX, windowY);
     return true;
 }
 
@@ -1000,15 +1310,7 @@ void RenderImGui()
 
     renderMainMenuBar();
 
-    if (showAnalyticsWindow)
-    {
-        renderAnalyticsWindow();
-    }
-
-    if (showSceneObjectsWindow)
-    {
-        renderSceneObjectsWindow();
-    }
+    renderRightSidebar();
 
     drawViewportGizmoOverlay();
 
@@ -1028,6 +1330,7 @@ void mainLoop()
         glfwPollEvents();
 
         runCuda();
+        updateRenderViewportLayout();
 
         std::string title = "CIS565 Path Tracer | " + utilityCore::convertIntToString(iteration) + " Iterations";
         glfwSetWindowTitle(window, title.c_str());
@@ -1040,6 +1343,7 @@ void mainLoop()
         glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
 
         // VAO, shader program, and texture already bound
+        glViewport(0, 0, renderViewportFramebufferWidth, renderViewportFramebufferHeight);
         glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, 0);
 
         // Render ImGui Stuff
@@ -1092,17 +1396,31 @@ int main(int argc, char** argv)
     width = cam.resolution.x;
     height = cam.resolution.y;
 
-    glm::vec3 view = cam.view;
-    cameraPosition = cam.position;
+    const glm::vec3 orbitOffset = cam.position - cam.lookAt;
+    cameraPosition = orbitOffset;
 
-    // compute phi (horizontal) and theta (vertical) relative 3D axis
-    // so, (0 0 1) is forward, (0 1 0) is up
-    glm::vec3 viewXZ = glm::vec3(view.x, 0.0f, view.z);
-    glm::vec3 viewZY = glm::vec3(0.0f, view.y, view.z);
-    phi = glm::acos(glm::dot(glm::normalize(viewXZ), glm::vec3(0, 0, -1)));
-    theta = glm::acos(glm::dot(glm::normalize(viewZY), glm::vec3(0, 1, 0)));
+    const float orbitDistance = glm::length(orbitOffset);
+    if (orbitDistance > EPSILON)
+    {
+        const glm::vec3 orbitDir = orbitOffset / orbitDistance;
+        theta = glm::acos(glm::clamp(orbitDir.y, -1.0f, 1.0f));
+        phi = atan2f(orbitDir.x, orbitDir.z);
+        if (phi < 0.0f)
+        {
+            phi += TWO_PI;
+        }
+    }
+    else
+    {
+        phi = 0.0f;
+        theta = PI * 0.5f;
+    }
     ogLookAt = cam.lookAt;
     zoom = glm::length(cam.position - ogLookAt);
+    defaultPhi = phi;
+    defaultTheta = theta;
+    defaultZoom = zoom;
+    defaultLookAt = ogLookAt;
 
     // Initialize CUDA and GL components
     init();

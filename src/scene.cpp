@@ -12,6 +12,7 @@
 #include <fstream>
 #include <iostream>
 #include <cfloat>
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -29,7 +30,7 @@ struct SceneImportContext
     std::unordered_map<std::string, uint32_t>& importedMaterialKeyToId;
     std::vector<Material>& materials;
     std::vector<TextureData>& textures;
-    std::vector<glm::vec3>& texturePixels;
+    std::vector<glm::vec4>& texturePixels;
 };
 
 std::filesystem::path resolveScenePath(
@@ -222,16 +223,19 @@ glm::vec3 parseVec3(const json& value)
 
 int ensureTextureLoaded(
     const std::filesystem::path& texturePath,
+    bool decodeSrgb,
     std::unordered_map<std::string, uint32_t>& texturePathToId,
     std::vector<TextureData>& textures,
-    std::vector<glm::vec3>& texturePixels)
+    std::vector<glm::vec4>& texturePixels)
 {
     if (texturePath.empty())
     {
         return -1;
     }
 
-    const std::string textureKey = std::filesystem::weakly_canonical(texturePath).string();
+    const std::string textureKey = std::filesystem::weakly_canonical(texturePath).string()
+        + "|"
+        + (decodeSrgb ? "srgb" : "linear");
     auto existing = texturePathToId.find(textureKey);
     if (existing != texturePathToId.end())
     {
@@ -240,7 +244,7 @@ int ensureTextureLoaded(
 
     TextureData texture{};
     std::string error;
-    if (!loadTextureImage(texturePath, true, texture, texturePixels, error))
+    if (!loadTextureImage(texturePath, true, decodeSrgb, texture, texturePixels, error))
     {
         throw std::runtime_error(error);
     }
@@ -257,7 +261,7 @@ int ensureHdrTextureLoaded(
     const std::filesystem::path& texturePath,
     std::unordered_map<std::string, uint32_t>& texturePathToId,
     std::vector<TextureData>& textures,
-    std::vector<glm::vec3>& texturePixels)
+    std::vector<glm::vec4>& texturePixels)
 {
     if (texturePath.empty())
     {
@@ -290,11 +294,21 @@ std::string importedMaterialKey(
     const std::filesystem::path& meshPath,
     const MeshMaterialDefinition& material)
 {
-    const std::string textureKey = !material.diffuseTextureKey.empty()
+    const std::string diffuseTextureKey = !material.diffuseTextureKey.empty()
         ? material.diffuseTextureKey
         : (material.diffuseTexturePath.empty()
             ? std::string()
             : std::filesystem::weakly_canonical(material.diffuseTexturePath).string());
+    const std::string metallicRoughnessTextureKey = !material.metallicRoughnessTextureKey.empty()
+        ? material.metallicRoughnessTextureKey
+        : (material.metallicRoughnessTexturePath.empty()
+            ? std::string()
+            : std::filesystem::weakly_canonical(material.metallicRoughnessTexturePath).string());
+    const std::string normalTextureKey = !material.normalTextureKey.empty()
+        ? material.normalTextureKey
+        : (material.normalTexturePath.empty()
+            ? std::string()
+            : std::filesystem::weakly_canonical(material.normalTexturePath).string());
     return meshPath.string()
         + "|"
         + material.name
@@ -305,35 +319,59 @@ std::string importedMaterialKey(
         + "|"
         + std::to_string(material.diffuseColor.b)
         + "|"
-        + textureKey
+        + std::to_string(material.metallicFactor)
+        + "|"
+        + std::to_string(material.roughnessFactor)
+        + "|"
+        + diffuseTextureKey
+        + "|"
+        + metallicRoughnessTextureKey
+        + "|"
+        + normalTextureKey
         + "|"
         + std::to_string(material.diffuseTexcoordSet)
+        + "|"
+        + std::to_string(material.metallicRoughnessTexcoordSet)
+        + "|"
+        + std::to_string(material.normalTexcoordSet)
+        + "|"
+        + std::to_string(material.normalTextureScale)
         + "|"
         + std::to_string(material.flipV ? 1 : 0)
         + "|"
         + std::to_string(material.wrapS)
         + "|"
-        + std::to_string(material.wrapT);
+        + std::to_string(material.wrapT)
+        + "|"
+        + std::to_string(material.doubleSided);
 }
 
 int ensureImportedTextureLoaded(
-    const MeshMaterialDefinition& importedMaterial,
+    const std::filesystem::path& texturePath,
+    const std::string& embeddedTextureKey,
+    const std::vector<unsigned char>& textureBytes,
+    bool flipV,
+    bool decodeSrgb,
+    int wrapS,
+    int wrapT,
     std::unordered_map<std::string, uint32_t>& texturePathToId,
     std::vector<TextureData>& textures,
-    std::vector<glm::vec3>& texturePixels)
+    std::vector<glm::vec4>& texturePixels)
 {
-    const std::string textureKey = !importedMaterial.diffuseTextureKey.empty()
-        ? importedMaterial.diffuseTextureKey
-        : (importedMaterial.diffuseTexturePath.empty()
+    const std::string textureKey = !embeddedTextureKey.empty()
+        ? embeddedTextureKey
+        : (texturePath.empty()
             ? std::string()
-            : std::filesystem::weakly_canonical(importedMaterial.diffuseTexturePath).string());
+            : std::filesystem::weakly_canonical(texturePath).string());
     const std::string texturedSamplerKey = textureKey
         + "|"
-        + std::to_string(importedMaterial.flipV ? 1 : 0)
+        + std::to_string(flipV ? 1 : 0)
         + "|"
-        + std::to_string(importedMaterial.wrapS)
+        + (decodeSrgb ? "srgb" : "linear")
         + "|"
-        + std::to_string(importedMaterial.wrapT);
+        + std::to_string(wrapS)
+        + "|"
+        + std::to_string(wrapT);
 
     if (textureKey.empty())
     {
@@ -349,27 +387,28 @@ int ensureImportedTextureLoaded(
     TextureData texture{};
     std::string error;
     bool loaded = false;
-    if (!importedMaterial.diffuseTextureBytes.empty())
+    if (!textureBytes.empty())
     {
         loaded = loadTextureImageFromMemory(
-            importedMaterial.diffuseTextureBytes.data(),
-            importedMaterial.diffuseTextureBytes.size(),
-            importedMaterial.flipV,
+            textureBytes.data(),
+            textureBytes.size(),
+            flipV,
+            decodeSrgb,
             texture,
             texturePixels,
             error);
     }
-    else if (!importedMaterial.diffuseTexturePath.empty())
+    else if (!texturePath.empty())
     {
-        loaded = loadTextureImage(importedMaterial.diffuseTexturePath, importedMaterial.flipV, texture, texturePixels, error);
+        loaded = loadTextureImage(texturePath, flipV, decodeSrgb, texture, texturePixels, error);
     }
 
     if (!loaded)
     {
         throw std::runtime_error(error.empty() ? ("Failed to load imported texture: " + textureKey) : error);
     }
-    texture.wrapS = importedMaterial.wrapS;
-    texture.wrapT = importedMaterial.wrapT;
+    texture.wrapS = wrapS;
+    texture.wrapT = wrapT;
 
     const int textureId = static_cast<int>(textures.size());
     texturePathToId[texturedSamplerKey] = static_cast<uint32_t>(textureId);
@@ -385,7 +424,7 @@ int registerImportedMaterial(
     std::unordered_map<std::string, uint32_t>& texturePathToId,
     std::vector<Material>& materials,
     std::vector<TextureData>& textures,
-    std::vector<glm::vec3>& texturePixels)
+    std::vector<glm::vec4>& texturePixels)
 {
     const std::string key = importedMaterialKey(meshPath, importedMaterial);
     auto existing = importedMaterialKeyToId.find(key);
@@ -396,8 +435,47 @@ int registerImportedMaterial(
 
     Material material = baseMaterial;
     material.color = importedMaterial.diffuseColor;
-    material.specular.color = importedMaterial.diffuseColor;
-    material.textureId = ensureImportedTextureLoaded(importedMaterial, texturePathToId, textures, texturePixels);
+    material.specularColor = importedMaterial.specularColor;
+    material.roughness = importedMaterial.roughnessFactor;
+    material.metallic = importedMaterial.metallicFactor;
+    material.alphaMode = importedMaterial.alphaMode;
+    material.alphaCutoff = importedMaterial.alphaCutoff;
+    material.doubleSided = importedMaterial.doubleSided;
+    material.normalTextureScale = importedMaterial.normalTextureScale;
+    material.hasReflective = fmaxf(material.hasReflective, importedMaterial.metallicFactor);
+    material.textureId = ensureImportedTextureLoaded(
+        importedMaterial.diffuseTexturePath,
+        importedMaterial.diffuseTextureKey,
+        importedMaterial.diffuseTextureBytes,
+        importedMaterial.flipV,
+        true,
+        importedMaterial.wrapS,
+        importedMaterial.wrapT,
+        texturePathToId,
+        textures,
+        texturePixels);
+    material.metallicRoughnessTextureId = ensureImportedTextureLoaded(
+        importedMaterial.metallicRoughnessTexturePath,
+        importedMaterial.metallicRoughnessTextureKey,
+        importedMaterial.metallicRoughnessTextureBytes,
+        importedMaterial.flipV,
+        false,
+        importedMaterial.wrapS,
+        importedMaterial.wrapT,
+        texturePathToId,
+        textures,
+        texturePixels);
+    material.normalTextureId = ensureImportedTextureLoaded(
+        importedMaterial.normalTexturePath,
+        importedMaterial.normalTextureKey,
+        importedMaterial.normalTextureBytes,
+        importedMaterial.flipV,
+        false,
+        importedMaterial.wrapS,
+        importedMaterial.wrapT,
+        texturePathToId,
+        textures,
+        texturePixels);
 
     const int materialId = static_cast<int>(materials.size());
     importedMaterialKeyToId[key] = static_cast<uint32_t>(materialId);
@@ -410,10 +488,16 @@ Material parseMaterialDefinition(
     const std::filesystem::path& scenePath,
     std::unordered_map<std::string, uint32_t>& texturePathToId,
     std::vector<TextureData>& textures,
-    std::vector<glm::vec3>& texturePixels)
+    std::vector<glm::vec4>& texturePixels)
 {
     Material material{};
     material.textureId = -1;
+    material.metallicRoughnessTextureId = -1;
+    material.normalTextureId = -1;
+    material.alphaMode = 0;
+    material.doubleSided = 0;
+    material.alphaCutoff = 0.5f;
+    material.normalTextureScale = 1.0f;
 
     glm::vec3 baseColor(1.0f);
     if (materialJson.contains("RGB"))
@@ -423,20 +507,38 @@ Material parseMaterialDefinition(
     }
 
     material.color = baseColor;
-    material.specular.color = baseColor;
-    material.specular.exponent = materialJson.value("ROUGHNESS", 0.0f);
+    material.specularColor = glm::vec3(0.04f);
+    material.roughness = materialJson.value("ROUGHNESS", 0.0f);
+    material.metallic = materialJson.value("METALLIC", 0.0f);
     material.indexOfRefraction = materialJson.value("IOR", 1.5f);
+
+    if (materialJson.contains("SPECULAR_RGB"))
+    {
+        const auto& col = materialJson["SPECULAR_RGB"];
+        material.specularColor = glm::vec3(col[0], col[1], col[2]);
+    }
 
     if (materialJson.contains("TEXTURE"))
     {
         const std::filesystem::path texturePath = resolveScenePath(scenePath, materialJson["TEXTURE"]);
-        material.textureId = ensureTextureLoaded(texturePath, texturePathToId, textures, texturePixels);
+        material.textureId = ensureTextureLoaded(texturePath, true, texturePathToId, textures, texturePixels);
+    }
+    if (materialJson.contains("METALLIC_ROUGHNESS_TEXTURE"))
+    {
+        const std::filesystem::path texturePath = resolveScenePath(scenePath, materialJson["METALLIC_ROUGHNESS_TEXTURE"]);
+        material.metallicRoughnessTextureId = ensureTextureLoaded(texturePath, false, texturePathToId, textures, texturePixels);
+    }
+    if (materialJson.contains("NORMAL_TEXTURE"))
+    {
+        const std::filesystem::path texturePath = resolveScenePath(scenePath, materialJson["NORMAL_TEXTURE"]);
+        material.normalTextureId = ensureTextureLoaded(texturePath, false, texturePathToId, textures, texturePixels);
+        material.normalTextureScale = materialJson.value("NORMAL_SCALE", 1.0f);
     }
 
     const std::string matType = materialJson["TYPE"];
     if (matType == "Diffuse")
     {
-        material.hasReflective = materialJson.value("REFLECTIVITY", 0.0f);
+        material.hasReflective = fmaxf(materialJson.value("REFLECTIVITY", 0.0f), material.metallic);
         material.hasRefractive = materialJson.value("REFRACTIVITY", 0.0f);
     }
     else if (matType == "Emitting")
@@ -445,6 +547,7 @@ Material parseMaterialDefinition(
     }
     else if (matType == "Specular")
     {
+        material.metallic = materialJson.value("METALLIC", 1.0f);
         material.hasReflective = materialJson.value("REFLECTIVITY", 1.0f);
     }
     else if (matType == "Refractive" || matType == "Glass")
@@ -453,7 +556,7 @@ Material parseMaterialDefinition(
     }
     else
     {
-        material.hasReflective = materialJson.value("REFLECTIVITY", 0.0f);
+        material.hasReflective = fmaxf(materialJson.value("REFLECTIVITY", 0.0f), material.metallic);
         material.hasRefractive = materialJson.value("REFRACTIVITY", 0.0f);
     }
 
@@ -463,20 +566,23 @@ Material parseMaterialDefinition(
 void remapMeshTriangleMaterials(
     SceneObject& object,
     const std::filesystem::path& meshPath,
-    const Material& baseMaterial,
+    Material baseMaterial,
     const std::vector<MeshMaterialDefinition>& importedMaterials,
     std::unordered_map<std::string, uint32_t>& importedMaterialKeyToId,
     std::unordered_map<std::string, uint32_t>& texturePathToId,
     std::vector<Material>& materials,
     std::vector<TextureData>& textures,
-    std::vector<glm::vec3>& texturePixels)
+    std::vector<glm::vec4>& texturePixels)
 {
+    object.usedMaterialIds.clear();
+
     if (importedMaterials.empty())
     {
         for (Triangle& triangle : object.localTriangles)
         {
             triangle.materialId = object.materialId;
         }
+        object.usedMaterialIds.push_back(object.materialId);
         return;
     }
 
@@ -505,12 +611,21 @@ void remapMeshTriangleMaterials(
             triangle.materialId = object.materialId;
         }
     }
+
+    object.usedMaterialIds.reserve(localMaterialToSceneMaterial.size());
+    for (const int materialId : localMaterialToSceneMaterial)
+    {
+        if (std::find(object.usedMaterialIds.begin(), object.usedMaterialIds.end(), materialId) == object.usedMaterialIds.end())
+        {
+            object.usedMaterialIds.push_back(materialId);
+        }
+    }
 }
 
 void initializeMeshObject(
     SceneObject& object,
     const SceneImportContext& importContext,
-    const Material& baseMaterial,
+    Material baseMaterial,
     std::vector<MeshMaterialDefinition>& importedMaterials)
 {
     const std::filesystem::path meshPath = resolveScenePath(importContext.scenePath, object.meshPath);
@@ -541,6 +656,14 @@ void initializeMeshObject(
     object.localTriangles.swap(localTriangles);
     object.localBboxMin = object.localBvhNodes[0].bboxMin;
     object.localBboxMax = object.localBvhNodes[0].bboxMax;
+
+    std::cout
+        << "Loaded mesh object '" << object.name << "' from " << meshPath.string()
+        << " with " << object.localTriangles.size() << " triangles"
+        << " bboxMin=(" << object.localBboxMin.x << ", " << object.localBboxMin.y << ", " << object.localBboxMin.z << ")"
+        << " bboxMax=(" << object.localBboxMax.x << ", " << object.localBboxMax.y << ", " << object.localBboxMax.z << ")"
+        << std::endl;
+
 }
 
 void loadMaterialsFromJson(const json& materialsData, const SceneImportContext& importContext)
@@ -567,11 +690,18 @@ SceneObject parseSceneObjectDefinition(
 {
     SceneObject object{};
     object.type = parseSceneObjectType(objectJson["TYPE"]);
-    object.materialId = static_cast<int>(materialNameToId.at(objectJson["MATERIAL"]));
+    const std::string materialName = objectJson["MATERIAL"];
+    const auto materialIt = materialNameToId.find(materialName);
+    if (materialIt == materialNameToId.end())
+    {
+        throw std::runtime_error("Unknown material referenced by object: " + materialName);
+    }
+    object.materialId = static_cast<int>(materialIt->second);
     object.name = objectJson.value("NAME", defaultObjectName(object.type, objectIndex));
     object.translation = parseVec3(objectJson["TRANS"]);
     object.rotation = parseVec3(objectJson["ROTAT"]);
     object.scale = parseVec3(objectJson["SCALE"]);
+    object.usedMaterialIds.push_back(object.materialId);
 
     if (object.type == SceneObjectType::Mesh)
     {
@@ -793,6 +923,38 @@ void Scene::updateObjectTransform(
     objects[objectIndex].rotation = rotation;
     objects[objectIndex].scale = scale;
     rebuildRenderData();
+}
+
+void Scene::updateObjectMaterialProperties(
+    size_t objectIndex,
+    float roughness,
+    float metallic)
+{
+    if (objectIndex >= objects.size())
+    {
+        return;
+    }
+
+    SceneObject& object = objects[objectIndex];
+    for (const int materialId : object.usedMaterialIds)
+    {
+        if (materialId < 0 || materialId >= static_cast<int>(materials.size()))
+        {
+            continue;
+        }
+
+        Material& material = materials[materialId];
+        if (material.emittance > 0.0f || material.hasRefractive > 0.0f)
+        {
+            continue;
+        }
+
+        material.roughness = roughness;
+        material.metallic = metallic;
+        material.hasReflective = fmaxf(material.hasReflective, metallic);
+    }
+
+    gpuDynamicDataDirty = true;
 }
 
 void Scene::loadFromJSON(const std::string& jsonName)

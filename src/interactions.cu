@@ -23,15 +23,102 @@ __host__ __device__ inline glm::vec3 safeDivide(const glm::vec3& value, float sc
     return value / fmaxf(scalar, EPSILON);
 }
 
+__host__ __device__ inline float materialRoughness(const Material& material)
+{
+    return glm::clamp(material.roughness, 0.0f, 1.0f);
+}
+
+__host__ __device__ inline float roughnessToAlpha(float roughness)
+{
+    const float perceptual = fmaxf(roughness, 0.02f);
+    return perceptual * perceptual;
+}
+
+__host__ __device__ inline float ggxDistribution(float cosThetaH, float alpha)
+{
+    if (cosThetaH <= 0.0f)
+    {
+        return 0.0f;
+    }
+
+    const float alpha2 = alpha * alpha;
+    const float denom = cosThetaH * cosThetaH * (alpha2 - 1.0f) + 1.0f;
+    return alpha2 / fmaxf(PI * denom * denom, EPSILON);
+}
+
+__host__ __device__ inline float smithG1(float cosTheta, float alpha)
+{
+    if (cosTheta <= 0.0f)
+    {
+        return 0.0f;
+    }
+
+    const float alpha2 = alpha * alpha;
+    const float cos2 = cosTheta * cosTheta;
+    return 2.0f * cosTheta / fmaxf(cosTheta + sqrtf(alpha2 + (1.0f - alpha2) * cos2), EPSILON);
+}
+
+__host__ __device__ inline float smithG2(float cosThetaO, float cosThetaI, float alpha)
+{
+    return smithG1(cosThetaO, alpha) * smithG1(cosThetaI, alpha);
+}
+
+__host__ __device__ inline glm::vec3 fresnelSchlick(const glm::vec3& f0, float cosTheta)
+{
+    const float oneMinusCos = 1.0f - glm::clamp(cosTheta, 0.0f, 1.0f);
+    const float factor = oneMinusCos * oneMinusCos * oneMinusCos * oneMinusCos * oneMinusCos;
+    return f0 + (glm::vec3(1.0f) - f0) * factor;
+}
+
+__host__ __device__ inline glm::vec3 sampleGgxHalfVector(
+    const glm::vec3& normal,
+    float alpha,
+    thrust::default_random_engine& rng)
+{
+    thrust::uniform_real_distribution<float> u01(0, 1);
+    const float u1 = u01(rng);
+    const float u2 = u01(rng);
+    const float phi = TWO_PI * u1;
+    const float tanTheta2 = (alpha * alpha) * u2 / fmaxf(1.0f - u2, EPSILON);
+    const float cosTheta = 1.0f / sqrtf(1.0f + tanTheta2);
+    const float sinTheta = sqrtf(fmaxf(0.0f, 1.0f - cosTheta * cosTheta));
+
+    glm::vec3 tangent;
+    if (fabsf(normal.x) < SQRT_OF_ONE_THIRD)
+    {
+        tangent = glm::normalize(glm::cross(normal, glm::vec3(1, 0, 0)));
+    }
+    else if (fabsf(normal.y) < SQRT_OF_ONE_THIRD)
+    {
+        tangent = glm::normalize(glm::cross(normal, glm::vec3(0, 1, 0)));
+    }
+    else
+    {
+        tangent = glm::normalize(glm::cross(normal, glm::vec3(0, 0, 1)));
+    }
+    const glm::vec3 bitangent = glm::normalize(glm::cross(normal, tangent));
+
+    return glm::normalize(
+        tangent * (cosf(phi) * sinTheta) +
+        bitangent * (sinf(phi) * sinTheta) +
+        normal * cosTheta);
+}
+
 __host__ __device__ void computeLobeProbabilities(
     const Material& m,
     float& pDiffuse,
     float& pReflect,
     float& pRefract)
 {
-    float reflectiveWeight = saturate(m.hasReflective);
+    const float reflectiveStrength = saturate(m.hasReflective);
     float refractiveWeight = saturate(m.hasRefractive);
-    float diffuseWeight = fmaxf(0.0f, 1.0f - reflectiveWeight - refractiveWeight);
+    const float dielectricSpecular = glm::clamp(max(max(m.specularColor.r, m.specularColor.g), m.specularColor.b), 0.0f, 1.0f);
+    float reflectiveWeight = reflectiveStrength * fmaxf(dielectricSpecular, 0.04f);
+    float diffuseWeight = (1.0f - refractiveWeight) * (1.0f - saturate(m.metallic));
+    if (reflectiveStrength <= 0.0f)
+    {
+        reflectiveWeight = 0.0f;
+    }
 
     float sumWeights = diffuseWeight + reflectiveWeight + refractiveWeight;
     if (sumWeights < EPSILON)
@@ -45,15 +132,79 @@ __host__ __device__ void computeLobeProbabilities(
     pRefract = refractiveWeight / sumWeights;
 }
 
-__host__ __device__ float evaluateBsdfPdf(
+__host__ __device__ bool materialHasNonDeltaBsdf(const Material& material)
+{
+    float pDiffuse, pReflect, pRefract;
+    computeLobeProbabilities(material, pDiffuse, pReflect, pRefract);
+    return pDiffuse > 0.0f || (pReflect > 0.0f && materialRoughness(material) > 0.001f);
+}
+
+__host__ __device__ glm::vec3 evaluateBsdf(
     const Material& material,
+    const glm::vec3& wo,
     const glm::vec3& shadingNormal,
     const glm::vec3& wi)
 {
     float pDiffuse, pReflect, pRefract;
     computeLobeProbabilities(material, pDiffuse, pReflect, pRefract);
+
+    glm::vec3 f(0.0f);
+    const float cosThetaI = fmaxf(0.0f, glm::dot(shadingNormal, wi));
+    const float cosThetaO = fmaxf(0.0f, glm::dot(shadingNormal, wo));
+
+    if (pDiffuse > 0.0f && cosThetaI > 0.0f && cosThetaO > 0.0f)
+    {
+        f += (material.color * (1.0f - material.metallic)) / PI;
+    }
+
+    if (pReflect > 0.0f && materialRoughness(material) > 0.001f && cosThetaI > 0.0f && cosThetaO > 0.0f)
+    {
+        const glm::vec3 halfVector = glm::normalize(wo + wi);
+        const float cosThetaH = fmaxf(0.0f, glm::dot(shadingNormal, halfVector));
+        const float cosWoH = fmaxf(0.0f, glm::dot(wo, halfVector));
+        if (cosThetaH > 0.0f && cosWoH > 0.0f)
+        {
+            const float alpha = roughnessToAlpha(materialRoughness(material));
+            const float D = ggxDistribution(cosThetaH, alpha);
+            const float G = smithG2(cosThetaO, cosThetaI, alpha);
+            const glm::vec3 F = fresnelSchlick(material.specularColor, cosWoH);
+            f += (D * G) * F / fmaxf(4.0f * cosThetaO * cosThetaI, EPSILON);
+        }
+    }
+
+    return f;
+}
+
+__host__ __device__ float evaluateBsdfPdf(
+    const Material& material,
+    const glm::vec3& wo,
+    const glm::vec3& shadingNormal,
+    const glm::vec3& wi)
+{
+    float pDiffuse, pReflect, pRefract;
+    computeLobeProbabilities(material, pDiffuse, pReflect, pRefract);
+    float pdf = 0.0f;
     const float cosTheta = fmaxf(0.0f, glm::dot(shadingNormal, wi));
-    return pDiffuse * (cosTheta / PI);
+    if (pDiffuse > 0.0f)
+    {
+        pdf += pDiffuse * (cosTheta / PI);
+    }
+
+    if (pReflect > 0.0f && materialRoughness(material) > 0.001f)
+    {
+        const glm::vec3 halfVector = glm::normalize(wo + wi);
+        const float cosThetaH = fmaxf(0.0f, glm::dot(shadingNormal, halfVector));
+        const float cosWoH = fmaxf(0.0f, glm::dot(wo, halfVector));
+        if (cosThetaH > 0.0f && cosWoH > 0.0f)
+        {
+            const float alpha = roughnessToAlpha(materialRoughness(material));
+            const float D = ggxDistribution(cosThetaH, alpha);
+            const float specPdf = (D * cosThetaH) / fmaxf(4.0f * cosWoH, EPSILON);
+            pdf += pReflect * specPdf;
+        }
+    }
+
+    return pdf;
 }
 
 __host__ __device__ glm::vec3 calculateRandomDirectionInHemisphere(
@@ -109,10 +260,39 @@ __host__ __device__ void scatterRay(
 
     if (xi < pReflect)
     {
-        sample.direction = glm::normalize(glm::reflect(wi, shadingNormal));
-        sample.pathWeight = safeDivide(m.color, pReflect);
-        sample.pdf = 0.0f;
-        sample.isDelta = 1;
+        const float roughness = materialRoughness(m);
+        if (roughness <= 0.001f)
+        {
+            sample.direction = glm::normalize(glm::reflect(wi, shadingNormal));
+            sample.pathWeight = safeDivide(m.specularColor, pReflect);
+            sample.pdf = 0.0f;
+            sample.isDelta = 1;
+            return;
+        }
+
+        const glm::vec3 wo = -wi;
+        glm::vec3 halfVector = sampleGgxHalfVector(shadingNormal, roughnessToAlpha(roughness), rng);
+        if (glm::dot(wo, halfVector) <= 0.0f)
+        {
+            halfVector = -halfVector;
+        }
+
+        sample.direction = glm::reflect(-wo, halfVector);
+        if (glm::dot(sample.direction, shadingNormal) <= 0.0f)
+        {
+            sample.direction = glm::normalize(glm::reflect(wi, shadingNormal));
+            sample.pathWeight = safeDivide(m.specularColor, pReflect);
+            sample.pdf = 0.0f;
+            sample.isDelta = 1;
+            return;
+        }
+
+        sample.direction = glm::normalize(sample.direction);
+        const glm::vec3 f = evaluateBsdf(m, wo, shadingNormal, sample.direction);
+        const float cosTheta = fmaxf(0.0f, glm::dot(shadingNormal, sample.direction));
+        sample.pdf = evaluateBsdfPdf(m, wo, shadingNormal, sample.direction);
+        sample.pathWeight = f * (cosTheta / fmaxf(sample.pdf, EPSILON));
+        sample.isDelta = 0;
         return;
     }
 
@@ -152,8 +332,7 @@ __host__ __device__ void scatterRay(
     }
 
     sample.direction = calculateRandomDirectionInHemisphere(shadingNormal, rng);
-    float cosTheta = fmaxf(0.0f, glm::dot(sample.direction, shadingNormal));
-    sample.pathWeight = safeDivide(m.color, pDiffuse);
-    sample.pdf = evaluateBsdfPdf(m, shadingNormal, sample.direction);
+    sample.pathWeight = safeDivide(m.color * (1.0f - saturate(m.metallic)), pDiffuse);
+    sample.pdf = evaluateBsdfPdf(m, -wi, shadingNormal, sample.direction);
     sample.isDelta = 0;
 }
