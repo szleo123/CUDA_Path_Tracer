@@ -139,6 +139,7 @@ bool loadAsciiPpmImage(
     outTexture.pixelOffset = static_cast<int>(outPixels.size());
     outTexture.wrapS = kWrapRepeat;
     outTexture.wrapT = kWrapRepeat;
+    outTexture.isConstantOpaque = 1;
     outPixels.reserve(outPixels.size() + width * height);
 
     const float invMax = 1.0f / static_cast<float>(maxValue);
@@ -512,9 +513,9 @@ void appendTriangle(
     const glm::vec3* n0,
     const glm::vec3* n1,
     const glm::vec3* n2,
-    const glm::vec2* uv0,
-    const glm::vec2* uv1,
-    const glm::vec2* uv2,
+    const glm::vec2* uv0[MAX_TEXTURE_UV_SETS],
+    const glm::vec2* uv1[MAX_TEXTURE_UV_SETS],
+    const glm::vec2* uv2[MAX_TEXTURE_UV_SETS],
     const glm::vec4* t0,
     const glm::vec4* t1,
     const glm::vec4* t2,
@@ -534,10 +535,17 @@ void appendTriangle(
     tri.n2 = n2 ? glm::normalize(glm::vec3(invTranspose * glm::vec4(*n2, 0.0f))) : faceNormal;
     tri.hasVertexNormals = (n0 && n1 && n2) ? 1 : 0;
 
-    tri.uv0 = uv0 ? *uv0 : glm::vec2(0.0f);
-    tri.uv1 = uv1 ? *uv1 : glm::vec2(0.0f);
-    tri.uv2 = uv2 ? *uv2 : glm::vec2(0.0f);
-    tri.hasUVs = (uv0 && uv1 && uv2) ? 1 : 0;
+    tri.uvSetMask = 0;
+    for (int uvSet = 0; uvSet < MAX_TEXTURE_UV_SETS; ++uvSet)
+    {
+        tri.uv0[uvSet] = uv0[uvSet] ? *uv0[uvSet] : glm::vec2(0.0f);
+        tri.uv1[uvSet] = uv1[uvSet] ? *uv1[uvSet] : glm::vec2(0.0f);
+        tri.uv2[uvSet] = uv2[uvSet] ? *uv2[uvSet] : glm::vec2(0.0f);
+        if (uv0[uvSet] && uv1[uvSet] && uv2[uvSet])
+        {
+            tri.uvSetMask |= (1 << uvSet);
+        }
+    }
     tri.t0 = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
     tri.t1 = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
     tri.t2 = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
@@ -603,10 +611,54 @@ int ensureMaterialDefinition(
     }
     material.alphaCutoff = static_cast<float>(src.alphaCutoff);
     material.doubleSided = src.doubleSided ? 1 : 0;
+    if (src.emissiveFactor.size() >= 3)
+    {
+        material.emissiveFactor = glm::vec3(
+            static_cast<float>(src.emissiveFactor[0]),
+            static_cast<float>(src.emissiveFactor[1]),
+            static_cast<float>(src.emissiveFactor[2]));
+    }
 
     int diffuseTextureIndex = -1;
     int diffuseTexcoordSet = 0;
     int normalTextureIndex = -1;
+    int emissiveTextureIndex = src.emissiveTexture.index;
+    int occlusionTextureIndex = src.occlusionTexture.index;
+
+    auto extractTextureReference = [&](int textureIndex,
+                                       std::filesystem::path& outPath,
+                                       std::string& outKey,
+                                       std::vector<unsigned char>& outBytes,
+                                       int* outWrapS = nullptr,
+                                       int* outWrapT = nullptr) {
+        if (textureIndex < 0 || textureIndex >= static_cast<int>(model.textures.size()))
+        {
+            return;
+        }
+
+        const tinygltf::Texture& texture = model.textures[textureIndex];
+        if (outWrapS != nullptr && outWrapT != nullptr
+            && texture.sampler >= 0 && texture.sampler < static_cast<int>(model.samplers.size()))
+        {
+            const tinygltf::Sampler& sampler = model.samplers[texture.sampler];
+            *outWrapS = sampler.wrapS;
+            *outWrapT = sampler.wrapT;
+        }
+
+        if (texture.source >= 0 && texture.source < static_cast<int>(model.images.size()))
+        {
+            const tinygltf::Image& image = model.images[texture.source];
+            if (!image.image.empty())
+            {
+                outBytes = image.image;
+            }
+            if (!image.uri.empty())
+            {
+                outPath = image.uri;
+            }
+            outKey = "gltf_image_" + std::to_string(texture.source);
+        }
+    };
 
     if (src.extensions.find("KHR_materials_pbrSpecularGlossiness") != src.extensions.end())
     {
@@ -622,17 +674,38 @@ int ensureMaterialDefinition(
                         static_cast<float>(diffuseFactor.Get(0).GetNumberAsDouble()),
                         static_cast<float>(diffuseFactor.Get(1).GetNumberAsDouble()),
                         static_cast<float>(diffuseFactor.Get(2).GetNumberAsDouble()));
+                    if (diffuseFactor.ArrayLen() >= 4)
+                    {
+                        material.baseAlpha = static_cast<float>(diffuseFactor.Get(3).GetNumberAsDouble());
+                    }
                 }
             }
             if (ext.Has("specularFactor"))
             {
                 const tinygltf::Value& specularFactor = ext.Get("specularFactor");
-                if (specularFactor.IsArray() && specularFactor.ArrayLen() >= 3)
+                if (specularFactor.IsNumber())
                 {
-                    material.specularColor = glm::vec3(
+                    material.specularFactor = static_cast<float>(specularFactor.GetNumberAsDouble());
+                }
+                else if (specularFactor.IsArray() && specularFactor.ArrayLen() >= 3)
+                {
+                    material.specularFactorColor = glm::vec3(
                         static_cast<float>(specularFactor.Get(0).GetNumberAsDouble()),
                         static_cast<float>(specularFactor.Get(1).GetNumberAsDouble()),
                         static_cast<float>(specularFactor.Get(2).GetNumberAsDouble()));
+                    material.hasExplicitSpecularColor = 1;
+                }
+            }
+            if (ext.Has("specularColorFactor"))
+            {
+                const tinygltf::Value& specularColorFactor = ext.Get("specularColorFactor");
+                if (specularColorFactor.IsArray() && specularColorFactor.ArrayLen() >= 3)
+                {
+                    material.specularFactorColor = glm::vec3(
+                        static_cast<float>(specularColorFactor.Get(0).GetNumberAsDouble()),
+                        static_cast<float>(specularColorFactor.Get(1).GetNumberAsDouble()),
+                        static_cast<float>(specularColorFactor.Get(2).GetNumberAsDouble()));
+                    material.hasExplicitSpecularColor = 1;
                 }
             }
             if (ext.Has("glossinessFactor"))
@@ -664,6 +737,10 @@ int ensureMaterialDefinition(
                 static_cast<float>(baseColorFactor[0]),
                 static_cast<float>(baseColorFactor[1]),
                 static_cast<float>(baseColorFactor[2]));
+            if (baseColorFactor.size() >= 4)
+            {
+                material.baseAlpha = static_cast<float>(baseColorFactor[3]);
+            }
         }
         material.metallicFactor = static_cast<float>(src.pbrMetallicRoughness.metallicFactor);
         material.roughnessFactor = static_cast<float>(src.pbrMetallicRoughness.roughnessFactor);
@@ -671,76 +748,119 @@ int ensureMaterialDefinition(
         diffuseTexcoordSet = src.pbrMetallicRoughness.baseColorTexture.texCoord;
     }
 
+    auto specularExtIt = src.extensions.find("KHR_materials_specular");
+    if (specularExtIt != src.extensions.end())
+    {
+        const tinygltf::Value& ext = specularExtIt->second;
+        if (ext.IsObject())
+        {
+            if (ext.Has("specularFactor"))
+            {
+                material.specularFactor = static_cast<float>(ext.Get("specularFactor").GetNumberAsDouble());
+            }
+            if (ext.Has("specularColorFactor"))
+            {
+                const tinygltf::Value& specularColorFactor = ext.Get("specularColorFactor");
+                if (specularColorFactor.IsArray() && specularColorFactor.ArrayLen() >= 3)
+                {
+                    material.specularFactorColor = glm::vec3(
+                        static_cast<float>(specularColorFactor.Get(0).GetNumberAsDouble()),
+                        static_cast<float>(specularColorFactor.Get(1).GetNumberAsDouble()),
+                        static_cast<float>(specularColorFactor.Get(2).GetNumberAsDouble()));
+                }
+            }
+        }
+    }
+
+    auto transmissionExtIt = src.extensions.find("KHR_materials_transmission");
+    if (transmissionExtIt != src.extensions.end())
+    {
+        const tinygltf::Value& ext = transmissionExtIt->second;
+        if (ext.IsObject() && ext.Has("transmissionFactor"))
+        {
+            material.transmissionFactor = static_cast<float>(ext.Get("transmissionFactor").GetNumberAsDouble());
+            material.thinWalled = material.transmissionFactor > 0.0f ? 1 : 0;
+        }
+    }
+
+    auto iorExtIt = src.extensions.find("KHR_materials_ior");
+    if (iorExtIt != src.extensions.end())
+    {
+        const tinygltf::Value& ext = iorExtIt->second;
+        if (ext.IsObject() && ext.Has("ior"))
+        {
+            material.indexOfRefraction = static_cast<float>(ext.Get("ior").GetNumberAsDouble());
+        }
+    }
+
+    auto clearcoatExtIt = src.extensions.find("KHR_materials_clearcoat");
+    if (clearcoatExtIt != src.extensions.end())
+    {
+        const tinygltf::Value& ext = clearcoatExtIt->second;
+        if (ext.IsObject())
+        {
+            if (ext.Has("clearcoatFactor"))
+            {
+                material.clearcoatFactor = static_cast<float>(ext.Get("clearcoatFactor").GetNumberAsDouble());
+            }
+            if (ext.Has("clearcoatRoughnessFactor"))
+            {
+                material.clearcoatRoughnessFactor = static_cast<float>(ext.Get("clearcoatRoughnessFactor").GetNumberAsDouble());
+            }
+        }
+    }
+
+    auto emissiveStrengthExtIt = src.extensions.find("KHR_materials_emissive_strength");
+    if (emissiveStrengthExtIt != src.extensions.end())
+    {
+        const tinygltf::Value& ext = emissiveStrengthExtIt->second;
+        if (ext.IsObject() && ext.Has("emissiveStrength"))
+        {
+            material.emissiveStrength = static_cast<float>(ext.Get("emissiveStrength").GetNumberAsDouble());
+        }
+    }
+
     material.diffuseTexcoordSet = diffuseTexcoordSet;
     material.flipV = false;
     material.wrapS = kWrapRepeat;
     material.wrapT = kWrapRepeat;
-
-    if (diffuseTextureIndex >= 0 && diffuseTextureIndex < static_cast<int>(model.textures.size()))
-    {
-        const tinygltf::Texture& texture = model.textures[diffuseTextureIndex];
-        if (texture.sampler >= 0 && texture.sampler < static_cast<int>(model.samplers.size()))
-        {
-            const tinygltf::Sampler& sampler = model.samplers[texture.sampler];
-            material.wrapS = sampler.wrapS;
-            material.wrapT = sampler.wrapT;
-        }
-
-        if (texture.source >= 0 && texture.source < static_cast<int>(model.images.size()))
-        {
-            const tinygltf::Image& image = model.images[texture.source];
-            if (!image.image.empty())
-            {
-                material.diffuseTextureBytes = image.image;
-            }
-            if (!image.uri.empty())
-            {
-                material.diffuseTexturePath = image.uri;
-            }
-            material.diffuseTextureKey = "gltf_image_" + std::to_string(texture.source);
-        }
-    }
+    extractTextureReference(
+        diffuseTextureIndex,
+        material.diffuseTexturePath,
+        material.diffuseTextureKey,
+        material.diffuseTextureBytes,
+        &material.wrapS,
+        &material.wrapT);
 
     const tinygltf::TextureInfo& metallicRoughnessInfo = src.pbrMetallicRoughness.metallicRoughnessTexture;
     material.metallicRoughnessTexcoordSet = metallicRoughnessInfo.texCoord;
-    if (metallicRoughnessInfo.index >= 0 && metallicRoughnessInfo.index < static_cast<int>(model.textures.size()))
-    {
-        const tinygltf::Texture& texture = model.textures[metallicRoughnessInfo.index];
-        if (texture.source >= 0 && texture.source < static_cast<int>(model.images.size()))
-        {
-            const tinygltf::Image& image = model.images[texture.source];
-            if (!image.image.empty())
-            {
-                material.metallicRoughnessTextureBytes = image.image;
-            }
-            if (!image.uri.empty())
-            {
-                material.metallicRoughnessTexturePath = image.uri;
-            }
-            material.metallicRoughnessTextureKey = "gltf_image_" + std::to_string(texture.source);
-        }
-    }
+    extractTextureReference(
+        metallicRoughnessInfo.index,
+        material.metallicRoughnessTexturePath,
+        material.metallicRoughnessTextureKey,
+        material.metallicRoughnessTextureBytes);
 
     normalTextureIndex = src.normalTexture.index;
     material.normalTexcoordSet = src.normalTexture.texCoord;
     material.normalTextureScale = static_cast<float>(src.normalTexture.scale);
-    if (normalTextureIndex >= 0 && normalTextureIndex < static_cast<int>(model.textures.size()))
-    {
-        const tinygltf::Texture& texture = model.textures[normalTextureIndex];
-        if (texture.source >= 0 && texture.source < static_cast<int>(model.images.size()))
-        {
-            const tinygltf::Image& image = model.images[texture.source];
-            if (!image.image.empty())
-            {
-                material.normalTextureBytes = image.image;
-            }
-            if (!image.uri.empty())
-            {
-                material.normalTexturePath = image.uri;
-            }
-            material.normalTextureKey = "gltf_image_" + std::to_string(texture.source);
-        }
-    }
+    extractTextureReference(
+        normalTextureIndex,
+        material.normalTexturePath,
+        material.normalTextureKey,
+        material.normalTextureBytes);
+    material.emissiveTexcoordSet = src.emissiveTexture.texCoord;
+    extractTextureReference(
+        emissiveTextureIndex,
+        material.emissiveTexturePath,
+        material.emissiveTextureKey,
+        material.emissiveTextureBytes);
+    material.occlusionTexcoordSet = src.occlusionTexture.texCoord;
+    material.occlusionStrength = static_cast<float>(src.occlusionTexture.strength);
+    extractTextureReference(
+        occlusionTextureIndex,
+        material.occlusionTexturePath,
+        material.occlusionTextureKey,
+        material.occlusionTextureBytes);
 
     outMaterials[gltfMaterialIndex] = std::move(material);
     return gltfMaterialIndex;
@@ -787,13 +907,9 @@ bool appendNodeMesh(
             }
 
             const int materialIndex = ensureMaterialDefinition(model, primitive.material, outMaterials);
-            const int texcoordSet = (materialIndex >= 0 && materialIndex < static_cast<int>(outMaterials.size()))
-                ? outMaterials[materialIndex].diffuseTexcoordSet
-                : 0;
-
             std::vector<glm::vec3> positions;
             std::vector<glm::vec3> normals;
-            std::vector<glm::vec2> texcoords;
+            std::vector<glm::vec2> texcoords[MAX_TEXTURE_UV_SETS];
             std::vector<glm::vec4> tangents;
             std::vector<uint32_t> indices;
 
@@ -816,16 +932,15 @@ bool appendNodeMesh(
                 return false;
             }
 
-            const std::string texcoordSemantic = "TEXCOORD_" + std::to_string(texcoordSet);
-            auto texcoordIt = primitive.attributes.find(texcoordSemantic);
-            if (texcoordIt == primitive.attributes.end() && texcoordSet != 0)
+            for (int uvSet = 0; uvSet < MAX_TEXTURE_UV_SETS; ++uvSet)
             {
-                texcoordIt = primitive.attributes.find("TEXCOORD_0");
-            }
-            if (texcoordIt != primitive.attributes.end()
-                && !readAccessorVec2(model, texcoordIt->second, texcoords, outError))
-            {
-                return false;
+                const std::string texcoordSemantic = "TEXCOORD_" + std::to_string(uvSet);
+                auto texcoordIt = primitive.attributes.find(texcoordSemantic);
+                if (texcoordIt != primitive.attributes.end()
+                    && !readAccessorVec2(model, texcoordIt->second, texcoords[uvSet], outError))
+                {
+                    return false;
+                }
             }
 
             if (primitive.indices >= 0)
@@ -864,9 +979,15 @@ bool appendNodeMesh(
                 const glm::vec3* n0 = (i0 < normals.size()) ? &normals[i0] : nullptr;
                 const glm::vec3* n1 = (i1 < normals.size()) ? &normals[i1] : nullptr;
                 const glm::vec3* n2 = (i2 < normals.size()) ? &normals[i2] : nullptr;
-                const glm::vec2* uv0 = (i0 < texcoords.size()) ? &texcoords[i0] : nullptr;
-                const glm::vec2* uv1 = (i1 < texcoords.size()) ? &texcoords[i1] : nullptr;
-                const glm::vec2* uv2 = (i2 < texcoords.size()) ? &texcoords[i2] : nullptr;
+                const glm::vec2* uv0[MAX_TEXTURE_UV_SETS]{};
+                const glm::vec2* uv1[MAX_TEXTURE_UV_SETS]{};
+                const glm::vec2* uv2[MAX_TEXTURE_UV_SETS]{};
+                for (int uvSet = 0; uvSet < MAX_TEXTURE_UV_SETS; ++uvSet)
+                {
+                    uv0[uvSet] = (i0 < texcoords[uvSet].size()) ? &texcoords[uvSet][i0] : nullptr;
+                    uv1[uvSet] = (i1 < texcoords[uvSet].size()) ? &texcoords[uvSet][i1] : nullptr;
+                    uv2[uvSet] = (i2 < texcoords[uvSet].size()) ? &texcoords[uvSet][i2] : nullptr;
+                }
                 const glm::vec4* t0 = (i0 < tangents.size()) ? &tangents[i0] : nullptr;
                 const glm::vec4* t1 = (i1 < tangents.size()) ? &tangents[i1] : nullptr;
                 const glm::vec4* t2 = (i2 < tangents.size()) ? &tangents[i2] : nullptr;
@@ -1055,6 +1176,7 @@ bool loadTextureImage(
     stbi_uc* data = stbi_load(texturePath.string().c_str(), &width, &height, &channels, 4);
     if (data)
     {
+        bool isConstantOpaque = true;
         outTexture.width = width;
         outTexture.height = height;
         outTexture.pixelOffset = static_cast<int>(outPixels.size());
@@ -1070,8 +1192,11 @@ bool loadTextureImage(
                 data[base + 0] / 255.0f,
                 data[base + 1] / 255.0f,
                 data[base + 2] / 255.0f);
-            outPixels.emplace_back(decodeSrgb ? srgbToLinear(rgb) : rgb, data[base + 3] / 255.0f);
+            const float alpha = data[base + 3] / 255.0f;
+            isConstantOpaque = isConstantOpaque && (data[base + 3] == 255);
+            outPixels.emplace_back(decodeSrgb ? srgbToLinear(rgb) : rgb, alpha);
         }
+        outTexture.isConstantOpaque = isConstantOpaque ? 1 : 0;
         stbi_image_free(data);
         return true;
     }
@@ -1111,6 +1236,7 @@ bool loadTextureImageFromMemory(
     outTexture.flipV = flipV ? 1 : 0;
     outTexture.wrapS = kWrapRepeat;
     outTexture.wrapT = kWrapRepeat;
+    bool isConstantOpaque = true;
     outPixels.reserve(outPixels.size() + width * height);
     for (int i = 0; i < width * height; ++i)
     {
@@ -1119,8 +1245,11 @@ bool loadTextureImageFromMemory(
             data[base + 0] / 255.0f,
             data[base + 1] / 255.0f,
             data[base + 2] / 255.0f);
-        outPixels.emplace_back(decodeSrgb ? srgbToLinear(rgb) : rgb, data[base + 3] / 255.0f);
+        const float alpha = data[base + 3] / 255.0f;
+        isConstantOpaque = isConstantOpaque && (data[base + 3] == 255);
+        outPixels.emplace_back(decodeSrgb ? srgbToLinear(rgb) : rgb, alpha);
     }
+    outTexture.isConstantOpaque = isConstantOpaque ? 1 : 0;
     stbi_image_free(data);
     return true;
 }
@@ -1148,6 +1277,7 @@ bool loadHdrImage(
     outTexture.flipV = flipV ? 1 : 0;
     outTexture.wrapS = kWrapRepeat;
     outTexture.wrapT = kWrapClampToEdge;
+    outTexture.isConstantOpaque = 1;
     outPixels.reserve(outPixels.size() + width * height);
 
     for (int i = 0; i < width * height; ++i)

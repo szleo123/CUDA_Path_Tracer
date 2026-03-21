@@ -121,16 +121,18 @@ __host__ __device__ float triangleIntersectionTest(
     glm::vec3& intersectionPoint,
     glm::vec3& shadingNormal,
     glm::vec3& geometricNormal,
-    glm::vec2& uv,
-    glm::vec3& tangent,
-    float& tangentSign)
+    glm::vec2 uv[MAX_TEXTURE_UV_SETS],
+    int& uvSetMask,
+    glm::vec3 tangents[MAX_TEXTURE_UV_SETS],
+    float tangentSigns[MAX_TEXTURE_UV_SETS],
+    int& tangentSetMask)
 {
     const glm::vec3 edge1 = triangle.p1 - triangle.p0;
     const glm::vec3 edge2 = triangle.p2 - triangle.p0;
     const glm::vec3 pvec = glm::cross(r.direction, edge2);
     const float det = glm::dot(edge1, pvec);
 
-    if (fabsf(det) < EPSILON)
+    if (fabsf(det) < RENDER_CONFIG_TRIANGLE_DET_EPSILON)
     {
         return -1.0f;
     }
@@ -151,7 +153,7 @@ __host__ __device__ float triangleIntersectionTest(
     }
 
     const float t = glm::dot(edge2, qvec) * invDet;
-    if (t <= MIN_INTERSECTION_T)
+    if (t <= RENDER_CONFIG_TRIANGLE_MIN_INTERSECTION_T)
     {
         return -1.0f;
     }
@@ -167,28 +169,58 @@ __host__ __device__ float triangleIntersectionTest(
         shadingNormal = -shadingNormal;
     }
 
-    uv = triangle.hasUVs
-        ? (w * triangle.uv0 + u * triangle.uv1 + v * triangle.uv2)
-        : glm::vec2(0.0f);
-    tangent = glm::vec3(0.0f);
-    tangentSign = 1.0f;
-
-    if (triangle.hasUVs)
+    uvSetMask = triangle.uvSetMask;
+    for (int uvSet = 0; uvSet < MAX_TEXTURE_UV_SETS; ++uvSet)
     {
-        const glm::vec3 dp1 = triangle.p1 - triangle.p0;
-        const glm::vec3 dp2 = triangle.p2 - triangle.p0;
-        const glm::vec2 duv1 = triangle.uv1 - triangle.uv0;
-        const glm::vec2 duv2 = triangle.uv2 - triangle.uv0;
+        uv[uvSet] = (triangle.uvSetMask & (1 << uvSet))
+            ? (w * triangle.uv0[uvSet] + u * triangle.uv1[uvSet] + v * triangle.uv2[uvSet])
+            : glm::vec2(0.0f);
+    }
+    tangentSetMask = 0;
+    for (int uvSet = 0; uvSet < MAX_TEXTURE_UV_SETS; ++uvSet)
+    {
+        tangents[uvSet] = glm::vec3(0.0f);
+        tangentSigns[uvSet] = 1.0f;
+    }
+
+    if (triangle.hasVertexTangents)
+    {
+        const glm::vec4 interpolatedTangent = w * triangle.t0 + u * triangle.t1 + v * triangle.t2;
+        const glm::vec3 tangent = glm::vec3(interpolatedTangent);
+        if (glm::dot(tangent, tangent) > EPSILON)
+        {
+            tangents[0] = glm::normalize(tangent);
+            tangentSigns[0] = interpolatedTangent.w < 0.0f ? -1.0f : 1.0f;
+            tangentSetMask |= 1;
+        }
+    }
+
+    const glm::vec3 dp1 = triangle.p1 - triangle.p0;
+    const glm::vec3 dp2 = triangle.p2 - triangle.p0;
+    for (int uvSet = 0; uvSet < MAX_TEXTURE_UV_SETS; ++uvSet)
+    {
+        if ((triangle.uvSetMask & (1 << uvSet)) == 0)
+        {
+            continue;
+        }
+        if (uvSet == 0 && (tangentSetMask & 1))
+        {
+            continue;
+        }
+
+        const glm::vec2 duv1 = triangle.uv1[uvSet] - triangle.uv0[uvSet];
+        const glm::vec2 duv2 = triangle.uv2[uvSet] - triangle.uv0[uvSet];
         const float detUv = duv1.x * duv2.y - duv1.y * duv2.x;
-        if (fabsf(detUv) > EPSILON)
+        if (fabsf(detUv) > RENDER_CONFIG_TRIANGLE_UV_DET_EPSILON)
         {
             const float invDetUv = 1.0f / detUv;
             const glm::vec3 derivedTangent = (dp1 * duv2.y - dp2 * duv1.y) * invDetUv;
             const glm::vec3 derivedBitangent = (dp2 * duv1.x - dp1 * duv2.x) * invDetUv;
             if (glm::dot(derivedTangent, derivedTangent) > EPSILON)
             {
-                tangent = glm::normalize(derivedTangent);
-                tangentSign = glm::dot(glm::cross(geometricNormal, tangent), derivedBitangent) < 0.0f ? -1.0f : 1.0f;
+                tangents[uvSet] = glm::normalize(derivedTangent);
+                tangentSigns[uvSet] = glm::dot(glm::cross(geometricNormal, tangents[uvSet]), derivedBitangent) < 0.0f ? -1.0f : 1.0f;
+                tangentSetMask |= (1 << uvSet);
             }
         }
     }

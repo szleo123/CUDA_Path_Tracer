@@ -70,6 +70,121 @@ __host__ __device__ inline glm::vec3 fresnelSchlick(const glm::vec3& f0, float c
     return f0 + (glm::vec3(1.0f) - f0) * factor;
 }
 
+__host__ __device__ inline float fresnelSchlickScalar(float f0, float cosTheta)
+{
+    const float oneMinusCos = 1.0f - glm::clamp(cosTheta, 0.0f, 1.0f);
+    const float factor = oneMinusCos * oneMinusCos * oneMinusCos * oneMinusCos * oneMinusCos;
+    return f0 + (1.0f - f0) * factor;
+}
+
+__host__ __device__ inline float materialClearcoatRoughness(const Material& material)
+{
+    return glm::clamp(material.clearcoatRoughness, 0.0f, 1.0f);
+}
+
+__host__ __device__ inline float materialTransmissionStrength(const Material& material)
+{
+    const float explicitTransmission = glm::clamp(material.transmissionFactor, 0.0f, 1.0f);
+    if (explicitTransmission > 0.0f)
+    {
+        return explicitTransmission;
+    }
+    return glm::clamp(material.hasRefractive, 0.0f, 1.0f);
+}
+
+__host__ __device__ inline float evaluateClearcoatTransmission(
+    const Material& material,
+    const glm::vec3& wo,
+    const glm::vec3& shadingNormal,
+    const glm::vec3& wi)
+{
+    if (material.clearcoatFactor <= 0.0f)
+    {
+        return 1.0f;
+    }
+
+    const glm::vec3 halfVector = wo + wi;
+    if (glm::dot(halfVector, halfVector) <= EPSILON)
+    {
+        return 1.0f;
+    }
+
+    const float clearcoatF = fresnelSchlickScalar(0.04f, fmaxf(0.0f, glm::dot(glm::normalize(halfVector), wo)));
+    const float coatTransmission = 1.0f - glm::clamp(material.clearcoatFactor, 0.0f, 1.0f) * clearcoatF;
+    return coatTransmission * coatTransmission;
+}
+
+__host__ __device__ inline glm::vec3 evaluateClearcoatBrdf(
+    const Material& material,
+    const glm::vec3& wo,
+    const glm::vec3& shadingNormal,
+    const glm::vec3& wi)
+{
+    const float clearcoatFactor = glm::clamp(material.clearcoatFactor, 0.0f, 1.0f);
+    if (clearcoatFactor <= 0.0f)
+    {
+        return glm::vec3(0.0f);
+    }
+
+    const float cosThetaI = fmaxf(0.0f, glm::dot(shadingNormal, wi));
+    const float cosThetaO = fmaxf(0.0f, glm::dot(shadingNormal, wo));
+    if (cosThetaI <= 0.0f || cosThetaO <= 0.0f)
+    {
+        return glm::vec3(0.0f);
+    }
+
+    const glm::vec3 halfVector = wo + wi;
+    if (glm::dot(halfVector, halfVector) <= EPSILON)
+    {
+        return glm::vec3(0.0f);
+    }
+
+    const glm::vec3 normalizedHalfVector = glm::normalize(halfVector);
+    const float cosThetaH = fmaxf(0.0f, glm::dot(shadingNormal, normalizedHalfVector));
+    const float cosWoH = fmaxf(0.0f, glm::dot(wo, normalizedHalfVector));
+    if (cosThetaH <= 0.0f || cosWoH <= 0.0f)
+    {
+        return glm::vec3(0.0f);
+    }
+
+    const float alpha = roughnessToAlpha(materialClearcoatRoughness(material));
+    const float D = ggxDistribution(cosThetaH, alpha);
+    const float G = smithG2(cosThetaO, cosThetaI, alpha);
+    const float F = fresnelSchlickScalar(0.04f, cosWoH);
+    const float clearcoat = clearcoatFactor * (D * G * F / fmaxf(4.0f * cosThetaO * cosThetaI, EPSILON));
+    return glm::vec3(clearcoat);
+}
+
+__host__ __device__ inline float evaluateClearcoatPdf(
+    const Material& material,
+    const glm::vec3& wo,
+    const glm::vec3& shadingNormal,
+    const glm::vec3& wi)
+{
+    if (material.clearcoatFactor <= 0.0f || materialClearcoatRoughness(material) <= 0.001f)
+    {
+        return 0.0f;
+    }
+
+    const glm::vec3 halfVector = wo + wi;
+    if (glm::dot(halfVector, halfVector) <= EPSILON)
+    {
+        return 0.0f;
+    }
+
+    const glm::vec3 normalizedHalfVector = glm::normalize(halfVector);
+    const float cosThetaH = fmaxf(0.0f, glm::dot(shadingNormal, normalizedHalfVector));
+    const float cosWoH = fmaxf(0.0f, glm::dot(wo, normalizedHalfVector));
+    if (cosThetaH <= 0.0f || cosWoH <= 0.0f)
+    {
+        return 0.0f;
+    }
+
+    const float alpha = roughnessToAlpha(materialClearcoatRoughness(material));
+    const float D = ggxDistribution(cosThetaH, alpha);
+    return (D * cosThetaH) / fmaxf(4.0f * cosWoH, EPSILON);
+}
+
 __host__ __device__ inline glm::vec3 sampleGgxHalfVector(
     const glm::vec3& normal,
     float alpha,
@@ -108,19 +223,26 @@ __host__ __device__ void computeLobeProbabilities(
     const Material& m,
     float& pDiffuse,
     float& pReflect,
+    float& pClearcoat,
     float& pRefract)
 {
     const float reflectiveStrength = saturate(m.hasReflective);
-    float refractiveWeight = saturate(m.hasRefractive);
+    const float clearcoatStrength = saturate(m.clearcoatFactor);
+    float refractiveWeight = materialTransmissionStrength(m);
     const float dielectricSpecular = glm::clamp(max(max(m.specularColor.r, m.specularColor.g), m.specularColor.b), 0.0f, 1.0f);
     float reflectiveWeight = reflectiveStrength * fmaxf(dielectricSpecular, 0.04f);
     float diffuseWeight = (1.0f - refractiveWeight) * (1.0f - saturate(m.metallic));
+    float clearcoatWeight = clearcoatStrength * 0.25f;
     if (reflectiveStrength <= 0.0f)
     {
         reflectiveWeight = 0.0f;
     }
+    if (clearcoatStrength <= 0.0f)
+    {
+        clearcoatWeight = 0.0f;
+    }
 
-    float sumWeights = diffuseWeight + reflectiveWeight + refractiveWeight;
+    float sumWeights = diffuseWeight + reflectiveWeight + clearcoatWeight + refractiveWeight;
     if (sumWeights < EPSILON)
     {
         diffuseWeight = 1.0f;
@@ -129,14 +251,17 @@ __host__ __device__ void computeLobeProbabilities(
 
     pDiffuse = diffuseWeight / sumWeights;
     pReflect = reflectiveWeight / sumWeights;
+    pClearcoat = clearcoatWeight / sumWeights;
     pRefract = refractiveWeight / sumWeights;
 }
 
 __host__ __device__ bool materialHasNonDeltaBsdf(const Material& material)
 {
-    float pDiffuse, pReflect, pRefract;
-    computeLobeProbabilities(material, pDiffuse, pReflect, pRefract);
-    return pDiffuse > 0.0f || (pReflect > 0.0f && materialRoughness(material) > 0.001f);
+    float pDiffuse, pReflect, pClearcoat, pRefract;
+    computeLobeProbabilities(material, pDiffuse, pReflect, pClearcoat, pRefract);
+    return pDiffuse > 0.0f
+        || (pReflect > 0.0f && materialRoughness(material) > 0.001f)
+        || (pClearcoat > 0.0f && materialClearcoatRoughness(material) > 0.001f);
 }
 
 __host__ __device__ glm::vec3 evaluateBsdf(
@@ -145,16 +270,17 @@ __host__ __device__ glm::vec3 evaluateBsdf(
     const glm::vec3& shadingNormal,
     const glm::vec3& wi)
 {
-    float pDiffuse, pReflect, pRefract;
-    computeLobeProbabilities(material, pDiffuse, pReflect, pRefract);
+    float pDiffuse, pReflect, pClearcoat, pRefract;
+    computeLobeProbabilities(material, pDiffuse, pReflect, pClearcoat, pRefract);
 
     glm::vec3 f(0.0f);
     const float cosThetaI = fmaxf(0.0f, glm::dot(shadingNormal, wi));
     const float cosThetaO = fmaxf(0.0f, glm::dot(shadingNormal, wo));
+    const float baseLayerTransmission = evaluateClearcoatTransmission(material, wo, shadingNormal, wi);
 
     if (pDiffuse > 0.0f && cosThetaI > 0.0f && cosThetaO > 0.0f)
     {
-        f += (material.color * (1.0f - material.metallic)) / PI;
+        f += baseLayerTransmission * ((material.color * (1.0f - material.metallic)) / PI);
     }
 
     if (pReflect > 0.0f && materialRoughness(material) > 0.001f && cosThetaI > 0.0f && cosThetaO > 0.0f)
@@ -168,8 +294,13 @@ __host__ __device__ glm::vec3 evaluateBsdf(
             const float D = ggxDistribution(cosThetaH, alpha);
             const float G = smithG2(cosThetaO, cosThetaI, alpha);
             const glm::vec3 F = fresnelSchlick(material.specularColor, cosWoH);
-            f += (D * G) * F / fmaxf(4.0f * cosThetaO * cosThetaI, EPSILON);
+            f += baseLayerTransmission * ((D * G) * F / fmaxf(4.0f * cosThetaO * cosThetaI, EPSILON));
         }
+    }
+
+    if (pClearcoat > 0.0f)
+    {
+        f += evaluateClearcoatBrdf(material, wo, shadingNormal, wi);
     }
 
     return f;
@@ -181,8 +312,8 @@ __host__ __device__ float evaluateBsdfPdf(
     const glm::vec3& shadingNormal,
     const glm::vec3& wi)
 {
-    float pDiffuse, pReflect, pRefract;
-    computeLobeProbabilities(material, pDiffuse, pReflect, pRefract);
+    float pDiffuse, pReflect, pClearcoat, pRefract;
+    computeLobeProbabilities(material, pDiffuse, pReflect, pClearcoat, pRefract);
     float pdf = 0.0f;
     const float cosTheta = fmaxf(0.0f, glm::dot(shadingNormal, wi));
     if (pDiffuse > 0.0f)
@@ -202,6 +333,11 @@ __host__ __device__ float evaluateBsdfPdf(
             const float specPdf = (D * cosThetaH) / fmaxf(4.0f * cosWoH, EPSILON);
             pdf += pReflect * specPdf;
         }
+    }
+
+    if (pClearcoat > 0.0f)
+    {
+        pdf += pClearcoat * evaluateClearcoatPdf(material, wo, shadingNormal, wi);
     }
 
     return pdf;
@@ -253,8 +389,8 @@ __host__ __device__ void scatterRay(
     glm::vec3 wi = glm::normalize(ray.direction);
     glm::vec3 shadingNormal = (glm::dot(wi, normal) < 0.0f) ? normal : -normal;
 
-    float pDiffuse, pReflect, pRefract;
-    computeLobeProbabilities(m, pDiffuse, pReflect, pRefract);
+    float pDiffuse, pReflect, pClearcoat, pRefract;
+    computeLobeProbabilities(m, pDiffuse, pReflect, pClearcoat, pRefract);
 
     float xi = u01(rng);
 
@@ -296,8 +432,61 @@ __host__ __device__ void scatterRay(
         return;
     }
 
-    if (xi < (pReflect + pRefract))
+    if (xi < (pReflect + pClearcoat))
     {
+        const float clearcoatRoughness = materialClearcoatRoughness(m);
+        if (clearcoatRoughness <= 0.001f)
+        {
+            sample.direction = glm::normalize(glm::reflect(wi, shadingNormal));
+            const float cosTheta = fmaxf(0.0f, glm::dot(-wi, shadingNormal));
+            const glm::vec3 clearcoatReflectance = glm::vec3(
+                glm::clamp(m.clearcoatFactor, 0.0f, 1.0f) * fresnelSchlickScalar(0.04f, cosTheta));
+            sample.pathWeight = safeDivide(clearcoatReflectance, pClearcoat);
+            sample.pdf = 0.0f;
+            sample.isDelta = 1;
+            return;
+        }
+
+        const glm::vec3 wo = -wi;
+        glm::vec3 halfVector = sampleGgxHalfVector(shadingNormal, roughnessToAlpha(clearcoatRoughness), rng);
+        if (glm::dot(wo, halfVector) <= 0.0f)
+        {
+            halfVector = -halfVector;
+        }
+
+        sample.direction = glm::reflect(-wo, halfVector);
+        if (glm::dot(sample.direction, shadingNormal) <= 0.0f)
+        {
+            sample.direction = glm::normalize(glm::reflect(wi, shadingNormal));
+            const float cosTheta = fmaxf(0.0f, glm::dot(-wi, shadingNormal));
+            const glm::vec3 clearcoatReflectance = glm::vec3(
+                glm::clamp(m.clearcoatFactor, 0.0f, 1.0f) * fresnelSchlickScalar(0.04f, cosTheta));
+            sample.pathWeight = safeDivide(clearcoatReflectance, pClearcoat);
+            sample.pdf = 0.0f;
+            sample.isDelta = 1;
+            return;
+        }
+
+        sample.direction = glm::normalize(sample.direction);
+        const glm::vec3 f = evaluateBsdf(m, wo, shadingNormal, sample.direction);
+        const float cosTheta = fmaxf(0.0f, glm::dot(shadingNormal, sample.direction));
+        sample.pdf = evaluateBsdfPdf(m, wo, shadingNormal, sample.direction);
+        sample.pathWeight = f * (cosTheta / fmaxf(sample.pdf, EPSILON));
+        sample.isDelta = 0;
+        return;
+    }
+
+    if (xi < (pReflect + pClearcoat + pRefract))
+    {
+        if (m.thinWalled && materialTransmissionStrength(m) > 0.0f)
+        {
+            sample.direction = wi;
+            sample.pathWeight = safeDivide(glm::vec3(materialTransmissionStrength(m)), pRefract);
+            sample.pdf = 0.0f;
+            sample.isDelta = 1;
+            return;
+        }
+
         float etaI = 1.0f;
         float etaT = (m.indexOfRefraction > 1.0f) ? m.indexOfRefraction : 1.5f;
         glm::vec3 n = normal;
@@ -325,7 +514,7 @@ __host__ __device__ void scatterRay(
         }
 
         sample.direction = glm::normalize(outDir);
-        sample.pathWeight = safeDivide(glm::vec3(1.0f), pRefract);
+        sample.pathWeight = safeDivide(glm::vec3(materialTransmissionStrength(m)), pRefract);
         sample.pdf = 0.0f;
         sample.isDelta = 1;
         return;

@@ -45,10 +45,9 @@ public:
         const glm::vec3& translation,
         const glm::vec3& rotation,
         const glm::vec3& scale);
-    void updateObjectMaterialProperties(
-        size_t objectIndex,
-        float roughness,
-        float metallic);
+    void updateMaterial(
+        size_t materialIndex,
+        const Material& material);
 
     std::vector<SceneObject> objects;
     std::vector<Geom> geoms;
@@ -58,6 +57,7 @@ public:
     std::vector<ScenePrimitive> scenePrimitives;
     std::vector<SceneBvhNode> sceneBvhNodes;
     std::vector<Material> materials;
+    std::vector<std::string> materialNames;
     std::vector<TextureData> textures;
     std::vector<glm::vec4> texturePixels;
     RenderState state;

@@ -129,9 +129,9 @@ static ShadeableIntersection* dev_intersections = NULL;
 static int* dev_materialSortKeys = NULL;
 static int* dev_lightGeomIndices = NULL;
 static float* dev_geomLightSelectionPmf = NULL;
-static float* dev_environmentMarginalCdf = NULL;
-static float* dev_environmentConditionalCdf = NULL;
 static float* dev_environmentTexelPmf = NULL;
+static float* dev_environmentAliasProb = NULL;
+static int* dev_environmentAliasIndex = NULL;
 static int hst_lightGeomCount = 0;
 static size_t dev_geomsCount = 0;
 static size_t dev_materialsCount = 0;
@@ -191,20 +191,20 @@ float computeEmissiveGeomWeight(const Geom& geom, const Material& material)
 
 void uploadEnvironmentSamplingData(const Scene* scene)
 {
-    if (dev_environmentMarginalCdf != nullptr)
-    {
-        checkCUDAResult(cudaFree(dev_environmentMarginalCdf), "free environment marginal cdf");
-        dev_environmentMarginalCdf = nullptr;
-    }
-    if (dev_environmentConditionalCdf != nullptr)
-    {
-        checkCUDAResult(cudaFree(dev_environmentConditionalCdf), "free environment conditional cdf");
-        dev_environmentConditionalCdf = nullptr;
-    }
     if (dev_environmentTexelPmf != nullptr)
     {
         checkCUDAResult(cudaFree(dev_environmentTexelPmf), "free environment texel pmf");
         dev_environmentTexelPmf = nullptr;
+    }
+    if (dev_environmentAliasProb != nullptr)
+    {
+        checkCUDAResult(cudaFree(dev_environmentAliasProb), "free environment alias probabilities");
+        dev_environmentAliasProb = nullptr;
+    }
+    if (dev_environmentAliasIndex != nullptr)
+    {
+        checkCUDAResult(cudaFree(dev_environmentAliasIndex), "free environment alias indices");
+        dev_environmentAliasIndex = nullptr;
     }
     dev_environmentWidth = 0;
     dev_environmentHeight = 0;
@@ -227,10 +227,8 @@ void uploadEnvironmentSamplingData(const Scene* scene)
 
     const int width = texture.width;
     const int height = texture.height;
-    std::vector<float> marginalCdf(height, 0.0f);
-    std::vector<float> conditionalCdf(static_cast<size_t>(width) * static_cast<size_t>(height), 0.0f);
-    std::vector<float> texelPmf(static_cast<size_t>(width) * static_cast<size_t>(height), 0.0f);
-    std::vector<float> rowWeights(height, 0.0f);
+    const size_t texelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
+    std::vector<float> texelPmf(texelCount, 0.0f);
 
     float totalWeight = 0.0f;
     for (int y = 0; y < height; ++y)
@@ -238,7 +236,6 @@ void uploadEnvironmentSamplingData(const Scene* scene)
         const float theta = PI * ((static_cast<float>(y) + 0.5f) / static_cast<float>(height));
         const float sinTheta = fmaxf(sinf(theta), EPSILON);
         const int rowOffset = y * width;
-        float rowWeight = 0.0f;
 
         for (int x = 0; x < width; ++x)
         {
@@ -246,74 +243,93 @@ void uploadEnvironmentSamplingData(const Scene* scene)
             const float luminance = 0.2126f * radiance.r + 0.7152f * radiance.g + 0.0722f * radiance.b;
             const float weight = fmaxf(luminance, 0.0f) * sinTheta;
             texelPmf[rowOffset + x] = weight;
-            rowWeight += weight;
-        }
-
-        rowWeights[y] = rowWeight;
-        totalWeight += rowWeight;
-
-        if (rowWeight > EPSILON)
-        {
-            float cumulative = 0.0f;
-            for (int x = 0; x < width; ++x)
-            {
-                cumulative += texelPmf[rowOffset + x] / rowWeight;
-                conditionalCdf[rowOffset + x] = (x == width - 1) ? 1.0f : cumulative;
-            }
-        }
-        else
-        {
-            for (int x = 0; x < width; ++x)
-            {
-                conditionalCdf[rowOffset + x] = static_cast<float>(x + 1) / static_cast<float>(width);
-            }
+            totalWeight += weight;
         }
     }
 
     if (totalWeight <= EPSILON)
     {
-        const float uniformTexelPmf = 1.0f / static_cast<float>(width * height);
-        for (int y = 0; y < height; ++y)
+        const float uniformTexelPmf = 1.0f / static_cast<float>(texelCount);
+        for (float& pmf : texelPmf)
         {
-            marginalCdf[y] = static_cast<float>(y + 1) / static_cast<float>(height);
-            const int rowOffset = y * width;
-            for (int x = 0; x < width; ++x)
-            {
-                texelPmf[rowOffset + x] = uniformTexelPmf;
-            }
+            pmf = uniformTexelPmf;
         }
     }
     else
     {
-        float cumulative = 0.0f;
-        for (int y = 0; y < height; ++y)
-        {
-            cumulative += rowWeights[y] / totalWeight;
-            marginalCdf[y] = (y == height - 1) ? 1.0f : cumulative;
-        }
-
         for (float& pmf : texelPmf)
         {
             pmf /= totalWeight;
         }
     }
 
-    checkCUDAResult(cudaMalloc(&dev_environmentMarginalCdf, marginalCdf.size() * sizeof(float)), "allocate environment marginal cdf");
-    checkCUDAResult(
-        cudaMemcpy(dev_environmentMarginalCdf, marginalCdf.data(), marginalCdf.size() * sizeof(float), cudaMemcpyHostToDevice),
-        "upload environment marginal cdf");
+    std::vector<float> aliasProb(texelCount, 1.0f);
+    std::vector<int> aliasIndex(texelCount, 0);
+    std::vector<float> scaledProb(texelCount, 0.0f);
+    std::vector<int> smallIndices;
+    std::vector<int> largeIndices;
+    smallIndices.reserve(texelCount);
+    largeIndices.reserve(texelCount);
 
-    checkCUDAResult(
-        cudaMalloc(&dev_environmentConditionalCdf, conditionalCdf.size() * sizeof(float)),
-        "allocate environment conditional cdf");
-    checkCUDAResult(
-        cudaMemcpy(dev_environmentConditionalCdf, conditionalCdf.data(), conditionalCdf.size() * sizeof(float), cudaMemcpyHostToDevice),
-        "upload environment conditional cdf");
+    const float texelCountFloat = static_cast<float>(texelCount);
+    for (size_t i = 0; i < texelCount; ++i)
+    {
+        scaledProb[i] = texelPmf[i] * texelCountFloat;
+        aliasIndex[i] = static_cast<int>(i);
+        if (scaledProb[i] < 1.0f)
+        {
+            smallIndices.push_back(static_cast<int>(i));
+        }
+        else
+        {
+            largeIndices.push_back(static_cast<int>(i));
+        }
+    }
+
+    while (!smallIndices.empty() && !largeIndices.empty())
+    {
+        const int smallIndex = smallIndices.back();
+        smallIndices.pop_back();
+        const int largeIndex = largeIndices.back();
+        largeIndices.pop_back();
+
+        aliasProb[smallIndex] = scaledProb[smallIndex];
+        aliasIndex[smallIndex] = largeIndex;
+
+        scaledProb[largeIndex] = (scaledProb[largeIndex] + scaledProb[smallIndex]) - 1.0f;
+        if (scaledProb[largeIndex] < 1.0f)
+        {
+            smallIndices.push_back(largeIndex);
+        }
+        else
+        {
+            largeIndices.push_back(largeIndex);
+        }
+    }
+
+    for (const int index : largeIndices)
+    {
+        aliasProb[index] = 1.0f;
+        aliasIndex[index] = index;
+    }
+    for (const int index : smallIndices)
+    {
+        aliasProb[index] = 1.0f;
+        aliasIndex[index] = index;
+    }
 
     checkCUDAResult(cudaMalloc(&dev_environmentTexelPmf, texelPmf.size() * sizeof(float)), "allocate environment texel pmf");
     checkCUDAResult(
         cudaMemcpy(dev_environmentTexelPmf, texelPmf.data(), texelPmf.size() * sizeof(float), cudaMemcpyHostToDevice),
         "upload environment texel pmf");
+    checkCUDAResult(cudaMalloc(&dev_environmentAliasProb, aliasProb.size() * sizeof(float)), "allocate environment alias probabilities");
+    checkCUDAResult(
+        cudaMemcpy(dev_environmentAliasProb, aliasProb.data(), aliasProb.size() * sizeof(float), cudaMemcpyHostToDevice),
+        "upload environment alias probabilities");
+    checkCUDAResult(cudaMalloc(&dev_environmentAliasIndex, aliasIndex.size() * sizeof(int)), "allocate environment alias indices");
+    checkCUDAResult(
+        cudaMemcpy(dev_environmentAliasIndex, aliasIndex.data(), aliasIndex.size() * sizeof(int), cudaMemcpyHostToDevice),
+        "upload environment alias indices");
 
     dev_environmentWidth = width;
     dev_environmentHeight = height;
@@ -405,19 +421,6 @@ void InitDataContainer(GuiDataContainer* imGuiData)
 
 void pathtraceInit(Scene* scene)
 {
-    static bool configuredCudaStackLimit = false;
-    if (!configuredCudaStackLimit)
-    {
-        configuredCudaStackLimit = true;
-        constexpr size_t kRequiredCudaStackSize = 32768;
-        size_t currentStackSize = 0;
-        checkCUDAResult(cudaDeviceGetLimit(&currentStackSize, cudaLimitStackSize), "query cuda stack size");
-        if (currentStackSize < kRequiredCudaStackSize)
-        {
-            checkCUDAResult(cudaDeviceSetLimit(cudaLimitStackSize, kRequiredCudaStackSize), "set cuda stack size");
-        }
-    }
-
     hst_scene = scene;
 
     const Camera& cam = hst_scene->state.camera;
@@ -473,6 +476,25 @@ void pathtraceResetAccumulation()
     checkCUDAError("pathtraceResetAccumulation");
 }
 
+void pathtraceDownloadImage()
+{
+    if (hst_scene == nullptr || dev_image == nullptr)
+    {
+        return;
+    }
+
+    const Camera& cam = hst_scene->state.camera;
+    const size_t pixelcount = static_cast<size_t>(cam.resolution.x) * static_cast<size_t>(cam.resolution.y);
+    checkCUDAResult(
+        cudaMemcpy(
+            hst_scene->state.image.data(),
+            dev_image,
+            pixelcount * sizeof(glm::vec3),
+            cudaMemcpyDeviceToHost),
+        "copy image from device");
+    checkCUDAError("pathtraceDownloadImage");
+}
+
 void pathtraceFree()
 {
     cudaFree(dev_image);  // no-op if dev_image is null
@@ -490,9 +512,9 @@ void pathtraceFree()
     cudaFree(dev_materialSortKeys);
     cudaFree(dev_lightGeomIndices);
     cudaFree(dev_geomLightSelectionPmf);
-    cudaFree(dev_environmentMarginalCdf);
-    cudaFree(dev_environmentConditionalCdf);
     cudaFree(dev_environmentTexelPmf);
+    cudaFree(dev_environmentAliasProb);
+    cudaFree(dev_environmentAliasIndex);
     dev_image = nullptr;
     dev_paths = nullptr;
     dev_geoms = nullptr;
@@ -508,9 +530,9 @@ void pathtraceFree()
     dev_materialSortKeys = nullptr;
     dev_lightGeomIndices = nullptr;
     dev_geomLightSelectionPmf = nullptr;
-    dev_environmentMarginalCdf = nullptr;
-    dev_environmentConditionalCdf = nullptr;
     dev_environmentTexelPmf = nullptr;
+    dev_environmentAliasProb = nullptr;
+    dev_environmentAliasIndex = nullptr;
     hst_lightGeomCount = 0;
     dev_geomsCount = 0;
     dev_materialsCount = 0;
@@ -567,17 +589,17 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
     }
 }
 
-constexpr int kMaxBvhStackSize = 1024;
-
 struct TraceHit
 {
     float t;
     glm::vec3 point;
     glm::vec3 shadingNormal;
     glm::vec3 geometricNormal;
-    glm::vec3 tangent;
-    float tangentSign;
-    glm::vec2 uv;
+    glm::vec3 tangents[MAX_TEXTURE_UV_SETS];
+    float tangentSigns[MAX_TEXTURE_UV_SETS];
+    int tangentSetMask;
+    glm::vec2 uv[MAX_TEXTURE_UV_SETS];
+    int uvSetMask;
     int geomId;
     int materialId;
     int triangleIndex;
@@ -644,12 +666,15 @@ __device__ inline void transformTraceHit(
     hit.point = multiplyMV(meshInstance.transform, glm::vec4(hit.point, 1.0f));
     hit.shadingNormal = glm::normalize(multiplyMV(meshInstance.invTranspose, glm::vec4(hit.shadingNormal, 0.0f)));
     hit.geometricNormal = glm::normalize(multiplyMV(meshInstance.invTranspose, glm::vec4(hit.geometricNormal, 0.0f)));
-    if (glm::dot(hit.tangent, hit.tangent) > EPSILON)
+    for (int uvSet = 0; uvSet < MAX_TEXTURE_UV_SETS; ++uvSet)
     {
-        const glm::vec3 transformedTangent = multiplyMV(meshInstance.transform, glm::vec4(hit.tangent, 0.0f));
-        hit.tangent = glm::dot(transformedTangent, transformedTangent) > EPSILON
-            ? glm::normalize(transformedTangent)
-            : glm::vec3(0.0f);
+        if (glm::dot(hit.tangents[uvSet], hit.tangents[uvSet]) > EPSILON)
+        {
+            const glm::vec3 transformedTangent = multiplyMV(meshInstance.transform, glm::vec4(hit.tangents[uvSet], 0.0f));
+            hit.tangents[uvSet] = glm::dot(transformedTangent, transformedTangent) > EPSILON
+                ? glm::normalize(transformedTangent)
+                : glm::vec3(0.0f);
+        }
     }
     if (glm::dot(hit.shadingNormal, hit.geometricNormal) < 0.0f)
     {
@@ -673,7 +698,7 @@ __device__ bool traverseTriangleBvhClosest(
         return false;
     }
 
-    int stack[kMaxBvhStackSize];
+    int stack[RENDER_CONFIG_MAX_TRIANGLE_BVH_STACK_SIZE];
     int stackSize = 0;
     stack[stackSize++] = rootNodeIndex;
     bool hit = false;
@@ -701,9 +726,11 @@ __device__ bool traverseTriangleBvhClosest(
                 glm::vec3 trianglePoint;
                 glm::vec3 shadingNormal;
                 glm::vec3 geometricNormal;
-                glm::vec2 uv;
-                glm::vec3 tangent;
-                float tangentSign = 1.0f;
+                glm::vec2 uv[MAX_TEXTURE_UV_SETS];
+                int uvSetMask = 0;
+                glm::vec3 tangents[MAX_TEXTURE_UV_SETS];
+                float tangentSigns[MAX_TEXTURE_UV_SETS];
+                int tangentSetMask = 0;
                 const float t = triangleIntersectionTest(
                     triangle,
                     ray,
@@ -711,17 +738,24 @@ __device__ bool traverseTriangleBvhClosest(
                     shadingNormal,
                     geometricNormal,
                     uv,
-                    tangent,
-                    tangentSign);
+                    uvSetMask,
+                    tangents,
+                    tangentSigns,
+                    tangentSetMask);
                 if (t > MIN_INTERSECTION_T && t < outHit.t)
                 {
                     outHit.t = t;
                     outHit.point = trianglePoint;
                     outHit.shadingNormal = shadingNormal;
                     outHit.geometricNormal = geometricNormal;
-                    outHit.tangent = tangent;
-                    outHit.tangentSign = tangentSign;
-                    outHit.uv = uv;
+                    outHit.uvSetMask = uvSetMask;
+                    outHit.tangentSetMask = tangentSetMask;
+                    for (int uvSet = 0; uvSet < MAX_TEXTURE_UV_SETS; ++uvSet)
+                    {
+                        outHit.uv[uvSet] = uv[uvSet];
+                        outHit.tangents[uvSet] = tangents[uvSet];
+                        outHit.tangentSigns[uvSet] = tangentSigns[uvSet];
+                    }
                     outHit.geomId = -1;
                     outHit.materialId = triangle.materialId;
                     outHit.triangleIndex = triangleIndex;
@@ -741,7 +775,7 @@ __device__ bool traverseTriangleBvhClosest(
         if (hitLeft && hitRight)
         {
             const bool leftFirst = leftEntry < rightEntry;
-            if (stackSize + 2 <= kMaxBvhStackSize)
+            if (stackSize + 2 <= RENDER_CONFIG_MAX_TRIANGLE_BVH_STACK_SIZE)
             {
                 stack[stackSize++] = leftFirst ? rightChild : leftChild;
                 stack[stackSize++] = leftFirst ? leftChild : rightChild;
@@ -749,14 +783,14 @@ __device__ bool traverseTriangleBvhClosest(
         }
         else if (hitLeft)
         {
-            if (stackSize + 1 <= kMaxBvhStackSize)
+            if (stackSize + 1 <= RENDER_CONFIG_MAX_TRIANGLE_BVH_STACK_SIZE)
             {
                 stack[stackSize++] = leftChild;
             }
         }
         else if (hitRight)
         {
-            if (stackSize + 1 <= kMaxBvhStackSize)
+            if (stackSize + 1 <= RENDER_CONFIG_MAX_TRIANGLE_BVH_STACK_SIZE)
             {
                 stack[stackSize++] = rightChild;
             }
@@ -793,9 +827,14 @@ __device__ bool intersectGeomDetailed(
         outHit.point = point;
         outHit.shadingNormal = normal;
         outHit.geometricNormal = normal;
-        outHit.tangent = glm::vec3(0.0f);
-        outHit.tangentSign = 1.0f;
-        outHit.uv = glm::vec2(0.0f);
+        outHit.tangentSetMask = 0;
+        outHit.uvSetMask = 0;
+        for (int uvSet = 0; uvSet < MAX_TEXTURE_UV_SETS; ++uvSet)
+        {
+            outHit.tangents[uvSet] = glm::vec3(0.0f);
+            outHit.tangentSigns[uvSet] = 1.0f;
+            outHit.uv[uvSet] = glm::vec2(0.0f);
+        }
         outHit.geomId = geomIndex;
         outHit.materialId = geom.materialid;
         outHit.triangleIndex = -1;
@@ -823,7 +862,14 @@ __device__ bool traceSceneClosest(
     outHit.t = maxDistance;
     outHit.geomId = -1;
     outHit.materialId = -1;
-    outHit.uv = glm::vec2(0.0f);
+    outHit.uvSetMask = 0;
+    outHit.tangentSetMask = 0;
+    for (int uvSet = 0; uvSet < MAX_TEXTURE_UV_SETS; ++uvSet)
+    {
+        outHit.uv[uvSet] = glm::vec2(0.0f);
+        outHit.tangents[uvSet] = glm::vec3(0.0f);
+        outHit.tangentSigns[uvSet] = 1.0f;
+    }
     outHit.triangleIndex = -1;
 
     if (scenePrimitives == nullptr || sceneBvhNodes == nullptr || sceneBvhNodeCount <= 0)
@@ -831,7 +877,7 @@ __device__ bool traceSceneClosest(
         return false;
     }
 
-    int stack[kMaxBvhStackSize];
+    int stack[RENDER_CONFIG_MAX_SCENE_BVH_STACK_SIZE];
     int stackSize = 0;
     stack[stackSize++] = 0;
 
@@ -898,7 +944,7 @@ __device__ bool traceSceneClosest(
         if (hitLeft && hitRight)
         {
             const bool leftFirst = leftEntry < rightEntry;
-            if (stackSize + 2 <= kMaxBvhStackSize)
+            if (stackSize + 2 <= RENDER_CONFIG_MAX_SCENE_BVH_STACK_SIZE)
             {
                 stack[stackSize++] = leftFirst ? rightChild : leftChild;
                 stack[stackSize++] = leftFirst ? leftChild : rightChild;
@@ -906,14 +952,14 @@ __device__ bool traceSceneClosest(
         }
         else if (hitLeft)
         {
-            if (stackSize + 1 <= kMaxBvhStackSize)
+            if (stackSize + 1 <= RENDER_CONFIG_MAX_SCENE_BVH_STACK_SIZE)
             {
                 stack[stackSize++] = leftChild;
             }
         }
         else if (hitRight)
         {
-            if (stackSize + 1 <= kMaxBvhStackSize)
+            if (stackSize + 1 <= RENDER_CONFIG_MAX_SCENE_BVH_STACK_SIZE)
             {
                 stack[stackSize++] = rightChild;
             }
@@ -945,11 +991,16 @@ __global__ void computeIntersections(
         {
             intersections[path_index].t = -1.0f;
             intersections[path_index].materialId = -1;
-            intersections[path_index].tangent = glm::vec3(0.0f);
-            intersections[path_index].tangentSign = 1.0f;
+            intersections[path_index].tangentSetMask = 0;
+            intersections[path_index].uvSetMask = 0;
+            for (int uvSet = 0; uvSet < MAX_TEXTURE_UV_SETS; ++uvSet)
+            {
+                intersections[path_index].tangents[uvSet] = glm::vec3(0.0f);
+                intersections[path_index].tangentSigns[uvSet] = 1.0f;
+                intersections[path_index].uv[uvSet] = glm::vec2(0.0f);
+            }
             intersections[path_index].geomId = -1;
             intersections[path_index].triangleIndex = -1;
-            intersections[path_index].uv = glm::vec2(0.0f);
             return;
         }
 
@@ -971,11 +1022,16 @@ __global__ void computeIntersections(
         {
             intersections[path_index].t = -1.0f;
             intersections[path_index].materialId = -1;
-            intersections[path_index].tangent = glm::vec3(0.0f);
-            intersections[path_index].tangentSign = 1.0f;
+            intersections[path_index].tangentSetMask = 0;
+            intersections[path_index].uvSetMask = 0;
+            for (int uvSet = 0; uvSet < MAX_TEXTURE_UV_SETS; ++uvSet)
+            {
+                intersections[path_index].tangents[uvSet] = glm::vec3(0.0f);
+                intersections[path_index].tangentSigns[uvSet] = 1.0f;
+                intersections[path_index].uv[uvSet] = glm::vec2(0.0f);
+            }
             intersections[path_index].geomId = -1;
             intersections[path_index].triangleIndex = -1;
-            intersections[path_index].uv = glm::vec2(0.0f);
         }
         else
         {
@@ -983,9 +1039,14 @@ __global__ void computeIntersections(
             intersections[path_index].materialId = hit.materialId;
             intersections[path_index].surfaceNormal = hit.shadingNormal;
             intersections[path_index].geometricNormal = hit.geometricNormal;
-            intersections[path_index].tangent = hit.tangent;
-            intersections[path_index].tangentSign = hit.tangentSign;
-            intersections[path_index].uv = hit.uv;
+            intersections[path_index].tangentSetMask = hit.tangentSetMask;
+            intersections[path_index].uvSetMask = hit.uvSetMask;
+            for (int uvSet = 0; uvSet < MAX_TEXTURE_UV_SETS; ++uvSet)
+            {
+                intersections[path_index].tangents[uvSet] = hit.tangents[uvSet];
+                intersections[path_index].tangentSigns[uvSet] = hit.tangentSigns[uvSet];
+                intersections[path_index].uv[uvSet] = hit.uv[uvSet];
+            }
             intersections[path_index].triangleIndex = hit.triangleIndex;
             intersections[path_index].geomId = hit.geomId;
         }
@@ -1011,10 +1072,6 @@ __host__ __device__ inline float powerHeuristic(float pdfA, float pdfB)
     return a2 / fmaxf(a2 + b2, EPSILON);
 }
 
-constexpr int kRussianRouletteStartBounce = 4;
-constexpr float kMinRussianRouletteSurvival = 0.1f;
-constexpr float kMaxRussianRouletteSurvival = 0.95f;
-
 __host__ __device__ inline float maxComponent(const glm::vec3& v)
 {
     return fmaxf(v.x, fmaxf(v.y, v.z));
@@ -1034,7 +1091,7 @@ __device__ inline glm::vec3 offsetRayOriginAlongDirection(
     const glm::vec3& direction,
     float scale = 1.0f)
 {
-    return point + glm::normalize(direction) * (RAY_ORIGIN_BIAS * scale);
+    return point + direction * (RAY_ORIGIN_BIAS * scale);
 }
 
 __device__ inline glm::vec4 sampleTexture(
@@ -1123,30 +1180,108 @@ __device__ inline glm::vec3 sampleTextureRgb(
     return glm::vec3(sampleTexture(texture, uv, texturePixels));
 }
 
+__device__ inline glm::vec2 selectUvSet(
+    const glm::vec2 uvSets[MAX_TEXTURE_UV_SETS],
+    int uvSetMask,
+    int requestedSet)
+{
+    const int clampedSet = glm::clamp(requestedSet, 0, MAX_TEXTURE_UV_SETS - 1);
+    if (uvSetMask & (1 << clampedSet))
+    {
+        return uvSets[clampedSet];
+    }
+    for (int uvSet = 0; uvSet < MAX_TEXTURE_UV_SETS; ++uvSet)
+    {
+        if (uvSetMask & (1 << uvSet))
+        {
+            return uvSets[uvSet];
+        }
+    }
+    return glm::vec2(0.0f);
+}
+
+__device__ inline void selectTangentBasis(
+    const ShadeableIntersection& intersection,
+    int requestedSet,
+    glm::vec3& tangent,
+    float& tangentSign)
+{
+    const int clampedSet = glm::clamp(requestedSet, 0, MAX_TEXTURE_UV_SETS - 1);
+    if (intersection.tangentSetMask & (1 << clampedSet))
+    {
+        tangent = intersection.tangents[clampedSet];
+        tangentSign = intersection.tangentSigns[clampedSet];
+        return;
+    }
+    if (intersection.tangentSetMask & 1)
+    {
+        tangent = intersection.tangents[0];
+        tangentSign = intersection.tangentSigns[0];
+        return;
+    }
+    tangent = glm::vec3(0.0f);
+    tangentSign = 1.0f;
+}
+
 __device__ inline glm::vec3 evaluateMaterialColor(
     const Material& material,
     const ShadeableIntersection& intersection,
     const TextureData* textures,
-    const glm::vec4* texturePixels)
+    const glm::vec4* texturePixels,
+    const glm::vec4* baseColorSample = nullptr)
 {
+    if (baseColorSample != nullptr)
+    {
+        return material.color * glm::vec3(*baseColorSample);
+    }
     if (material.textureId < 0 || textures == nullptr || texturePixels == nullptr)
     {
         return material.color;
     }
-    return material.color * sampleTextureRgb(textures[material.textureId], intersection.uv, texturePixels);
+    const glm::vec2 uv = selectUvSet(intersection.uv, intersection.uvSetMask, material.baseColorTexcoordSet);
+    return material.color * sampleTextureRgb(textures[material.textureId], uv, texturePixels);
 }
 
 __device__ inline float evaluateMaterialAlpha(
     const Material& material,
     const ShadeableIntersection& intersection,
     const TextureData* textures,
+    const glm::vec4* texturePixels,
+    const glm::vec4* baseColorSample = nullptr)
+{
+    if (baseColorSample != nullptr)
+    {
+        return material.baseAlpha * baseColorSample->a;
+    }
+    if (material.textureId < 0 || textures == nullptr || texturePixels == nullptr)
+    {
+        return material.baseAlpha;
+    }
+    const TextureData& texture = textures[material.textureId];
+    if (texture.isConstantOpaque)
+    {
+        return material.baseAlpha;
+    }
+    const glm::vec2 uv = selectUvSet(intersection.uv, intersection.uvSetMask, material.baseColorTexcoordSet);
+    return material.baseAlpha * sampleTexture(texture, uv, texturePixels).a;
+}
+
+__device__ inline float evaluateMaterialAlphaFromUv(
+    const Material& material,
+    const glm::vec2& uv,
+    const TextureData* textures,
     const glm::vec4* texturePixels)
 {
     if (material.textureId < 0 || textures == nullptr || texturePixels == nullptr)
     {
-        return 1.0f;
+        return material.baseAlpha;
     }
-    return sampleTexture(textures[material.textureId], intersection.uv, texturePixels).a;
+    const TextureData& texture = textures[material.textureId];
+    if (texture.isConstantOpaque)
+    {
+        return material.baseAlpha;
+    }
+    return material.baseAlpha * sampleTexture(texture, uv, texturePixels).a;
 }
 
 __device__ inline glm::vec2 evaluateMetallicRoughness(
@@ -1159,11 +1294,47 @@ __device__ inline glm::vec2 evaluateMetallicRoughness(
     float roughness = glm::clamp(material.roughness, 0.0f, 1.0f);
     if (material.metallicRoughnessTextureId >= 0 && textures != nullptr && texturePixels != nullptr)
     {
-        const glm::vec3 mr = sampleTextureRgb(textures[material.metallicRoughnessTextureId], intersection.uv, texturePixels);
+        const glm::vec2 uv = selectUvSet(intersection.uv, intersection.uvSetMask, material.metallicRoughnessTexcoordSet);
+        const glm::vec3 mr = sampleTextureRgb(textures[material.metallicRoughnessTextureId], uv, texturePixels);
         roughness = glm::clamp(roughness * mr.g, 0.0f, 1.0f);
         metallic = glm::clamp(metallic * mr.b, 0.0f, 1.0f);
     }
     return glm::vec2(metallic, roughness);
+}
+
+__device__ inline glm::vec3 evaluateMaterialEmission(
+    const Material& material,
+    const ShadeableIntersection& intersection,
+    const TextureData* textures,
+    const glm::vec4* texturePixels)
+{
+    if (material.emittance <= 0.0f)
+    {
+        return glm::vec3(0.0f);
+    }
+
+    glm::vec3 emission = material.emissiveColor;
+    if (material.emissiveTextureId >= 0 && textures != nullptr && texturePixels != nullptr)
+    {
+        const glm::vec2 uv = selectUvSet(intersection.uv, intersection.uvSetMask, material.emissiveTexcoordSet);
+        emission *= sampleTextureRgb(textures[material.emissiveTextureId], uv, texturePixels);
+    }
+    return emission * material.emittance;
+}
+
+__device__ inline float evaluateMaterialOcclusion(
+    const Material& material,
+    const ShadeableIntersection& intersection,
+    const TextureData* textures,
+    const glm::vec4* texturePixels)
+{
+    if (material.occlusionTextureId < 0 || textures == nullptr || texturePixels == nullptr)
+    {
+        return 1.0f;
+    }
+    const glm::vec2 uv = selectUvSet(intersection.uv, intersection.uvSetMask, material.occlusionTexcoordSet);
+    const float ao = sampleTexture(textures[material.occlusionTextureId], uv, texturePixels).r;
+    return glm::mix(1.0f, ao, glm::clamp(material.occlusionStrength, 0.0f, 1.0f));
 }
 
 __device__ inline glm::vec3 buildFallbackTangent(const glm::vec3& normal)
@@ -1197,7 +1368,9 @@ __device__ inline glm::vec3 evaluateShadingNormal(
         return shadingNormal;
     }
 
-    glm::vec3 tangent = intersection.tangent;
+    glm::vec3 tangent(0.0f);
+    float tangentSign = 1.0f;
+    selectTangentBasis(intersection, material.normalTexcoordSet, tangent, tangentSign);
     if (glm::dot(tangent, tangent) > EPSILON)
     {
         tangent -= shadingNormal * glm::dot(shadingNormal, tangent);
@@ -1212,7 +1385,7 @@ __device__ inline glm::vec3 evaluateShadingNormal(
     }
 
     glm::vec3 bitangent = glm::cross(shadingNormal, tangent);
-    if (intersection.tangentSign < 0.0f)
+    if (tangentSign < 0.0f)
     {
         bitangent = -bitangent;
     }
@@ -1222,7 +1395,8 @@ __device__ inline glm::vec3 evaluateShadingNormal(
     }
     bitangent = glm::normalize(bitangent);
 
-    glm::vec3 tangentSpaceNormal = sampleTextureRgb(textures[material.normalTextureId], intersection.uv, texturePixels) * 2.0f - glm::vec3(1.0f);
+    const glm::vec2 uv = selectUvSet(intersection.uv, intersection.uvSetMask, material.normalTexcoordSet);
+    glm::vec3 tangentSpaceNormal = sampleTextureRgb(textures[material.normalTextureId], uv, texturePixels) * 2.0f - glm::vec3(1.0f);
     tangentSpaceNormal.x *= material.normalTextureScale;
     tangentSpaceNormal.y *= material.normalTextureScale;
     if (glm::dot(tangentSpaceNormal, tangentSpaceNormal) <= EPSILON)
@@ -1246,15 +1420,19 @@ __device__ inline Material evaluateShadingMaterial(
     const Material& material,
     const ShadeableIntersection& intersection,
     const TextureData* textures,
-    const glm::vec4* texturePixels)
+    const glm::vec4* texturePixels,
+    const glm::vec4* baseColorSample = nullptr)
 {
     Material shadingMaterial = material;
-    shadingMaterial.color = evaluateMaterialColor(material, intersection, textures, texturePixels);
+    shadingMaterial.color = evaluateMaterialColor(material, intersection, textures, texturePixels, baseColorSample);
     const glm::vec2 metallicRoughness = evaluateMetallicRoughness(material, intersection, textures, texturePixels);
     shadingMaterial.metallic = metallicRoughness.x;
     shadingMaterial.roughness = metallicRoughness.y;
+    const float occlusion = evaluateMaterialOcclusion(material, intersection, textures, texturePixels);
+    shadingMaterial.color *= occlusion;
     shadingMaterial.specularColor = glm::mix(material.specularColor, shadingMaterial.color, shadingMaterial.metallic);
     shadingMaterial.hasReflective = fmaxf(shadingMaterial.hasReflective, shadingMaterial.metallic);
+    shadingMaterial.hasRefractive = fmaxf(shadingMaterial.hasRefractive, shadingMaterial.transmissionFactor);
     return shadingMaterial;
 }
 
@@ -1268,12 +1446,12 @@ __device__ inline glm::vec3 evaluateTextureOnlyColor(
     {
         return glm::vec3(1.0f, 0.0f, 1.0f);
     }
-    return sampleTextureRgb(textures[material.textureId], intersection.uv, texturePixels);
+    const glm::vec2 uv = selectUvSet(intersection.uv, intersection.uvSetMask, material.baseColorTexcoordSet);
+    return sampleTextureRgb(textures[material.textureId], uv, texturePixels);
 }
 
 __device__ inline glm::vec2 directionToEnvironmentUv(glm::vec3 direction, float rotationDegrees)
 {
-    direction = glm::normalize(direction);
     const float rotationRadians = rotationDegrees * (PI / 180.0f);
     const float cosTheta = cosf(rotationRadians);
     const float sinTheta = sinf(rotationRadians);
@@ -1302,17 +1480,16 @@ __device__ inline glm::vec3 environmentUvToDirection(glm::vec2 uv, float rotatio
     const float rotationRadians = rotationDegrees * (PI / 180.0f);
     const float cosRot = cosf(rotationRadians);
     const float sinRot = sinf(rotationRadians);
-    return glm::normalize(glm::vec3(
+    return glm::vec3(
         cosRot * rotatedDirection.x + sinRot * rotatedDirection.z,
         rotatedDirection.y,
-        -sinRot * rotatedDirection.x + cosRot * rotatedDirection.z));
+        -sinRot * rotatedDirection.x + cosRot * rotatedDirection.z);
 }
 
 __device__ inline glm::vec3 evaluateProceduralSky(
     const EnvironmentSettings& environment,
     glm::vec3 direction)
 {
-    direction = glm::normalize(direction);
     const float upness = glm::clamp(direction.y * 0.5f + 0.5f, 0.0f, 1.0f);
     const float horizonBlend = 1.0f - fabsf(direction.y);
 
@@ -1343,43 +1520,21 @@ __device__ inline glm::vec3 sampleEnvironment(
     return radiance * environment.intensity;
 }
 
-__device__ inline int sampleCdfIndex(
-    float xi,
-    const float* cdf,
-    int count)
-{
-    int left = 0;
-    int right = count - 1;
-    while (left < right)
-    {
-        const int mid = left + (right - left) / 2;
-        if (xi <= cdf[mid])
-        {
-            right = mid;
-        }
-        else
-        {
-            left = mid + 1;
-        }
-    }
-    return left;
-}
-
 __device__ inline bool hasEnvironmentImportanceSampling(
     const EnvironmentSettings& environment,
     const TextureData* textures,
-    const float* environmentMarginalCdf,
-    const float* environmentConditionalCdf,
     const float* environmentTexelPmf,
+    const float* environmentAliasProb,
+    const int* environmentAliasIndex,
     int environmentWidth,
     int environmentHeight)
 {
     return !environment.useProceduralSky
         && environment.textureId >= 0
         && textures != nullptr
-        && environmentMarginalCdf != nullptr
-        && environmentConditionalCdf != nullptr
         && environmentTexelPmf != nullptr
+        && environmentAliasProb != nullptr
+        && environmentAliasIndex != nullptr
         && environmentWidth > 0
         && environmentHeight > 0;
 }
@@ -1426,9 +1581,9 @@ __device__ inline bool sampleEnvironmentLight(
     const EnvironmentSettings& environment,
     const TextureData* textures,
     const glm::vec4* texturePixels,
-    const float* environmentMarginalCdf,
-    const float* environmentConditionalCdf,
     const float* environmentTexelPmf,
+    const float* environmentAliasProb,
+    const int* environmentAliasIndex,
     int environmentWidth,
     int environmentHeight,
     glm::vec3& outDirection,
@@ -1438,9 +1593,9 @@ __device__ inline bool sampleEnvironmentLight(
     if (!hasEnvironmentImportanceSampling(
             environment,
             textures,
-            environmentMarginalCdf,
-            environmentConditionalCdf,
             environmentTexelPmf,
+            environmentAliasProb,
+            environmentAliasIndex,
             environmentWidth,
             environmentHeight))
     {
@@ -1449,10 +1604,14 @@ __device__ inline bool sampleEnvironmentLight(
     }
 
     thrust::uniform_real_distribution<float> u01(0, 1);
-    const float rowXi = u01(rng);
-    const float colXi = u01(rng);
-    const int row = sampleCdfIndex(rowXi, environmentMarginalCdf, environmentHeight);
-    const int col = sampleCdfIndex(colXi, environmentConditionalCdf + row * environmentWidth, environmentWidth);
+    const int texelCount = environmentWidth * environmentHeight;
+    const float texelXi = u01(rng) * static_cast<float>(texelCount);
+    const int candidate = glm::min(static_cast<int>(texelXi), texelCount - 1);
+    const int texelIndex = (u01(rng) < environmentAliasProb[candidate])
+        ? candidate
+        : environmentAliasIndex[candidate];
+    const int row = texelIndex / environmentWidth;
+    const int col = texelIndex - row * environmentWidth;
     const float jitterU = u01(rng);
     const float jitterV = u01(rng);
     const glm::vec2 uv(
@@ -1496,7 +1655,7 @@ __device__ inline glm::vec3 evaluateMeshDebugColor(
     switch (renderDebugMode)
     {
     case RENDER_DEBUG_MESH_UV_CHECKER:
-        return evaluateMeshUvCheckerColor(intersection.uv);
+        return evaluateMeshUvCheckerColor(selectUvSet(intersection.uv, intersection.uvSetMask, material.baseColorTexcoordSet));
     case RENDER_DEBUG_MESH_BASE_COLOR:
         return shadingMaterial.color;
     case RENDER_DEBUG_MESH_TEXTURE_ONLY:
@@ -1676,8 +1835,9 @@ __device__ glm::vec3 computeShadowTransmittance(
     Ray currentRay = shadowRay;
     float remainingDistance = maxDistance;
     int ignoreTriangleIndex = initialIgnoreTriangleIndex;
+    glm::vec3 transmittance(1.0f);
 
-    for (int step = 0; step < 32 && remainingDistance > MIN_INTERSECTION_T; ++step)
+    for (int step = 0; step < RENDER_CONFIG_SHADOW_TRANSMITTANCE_MAX_STEPS && remainingDistance > MIN_INTERSECTION_T; ++step)
     {
         TraceHit hit{};
         if (!traceSceneClosest(
@@ -1695,37 +1855,49 @@ __device__ glm::vec3 computeShadowTransmittance(
             triangleBvhNodeCount,
             hit))
         {
-            return glm::vec3(1.0f);
+            return transmittance;
         }
 
         const Material& material = materials[hit.materialId];
         if (material.alphaMode == 1)
         {
-            ShadeableIntersection alphaIntersection{};
-            alphaIntersection.t = hit.t;
-            alphaIntersection.surfaceNormal = hit.shadingNormal;
-            alphaIntersection.geometricNormal = hit.geometricNormal;
-            alphaIntersection.tangent = hit.tangent;
-            alphaIntersection.tangentSign = hit.tangentSign;
-            alphaIntersection.uv = hit.uv;
-            alphaIntersection.materialId = hit.materialId;
-            alphaIntersection.triangleIndex = hit.triangleIndex;
-            alphaIntersection.geomId = hit.geomId;
-
-            const float alpha = evaluateMaterialAlpha(material, alphaIntersection, textures, texturePixels);
+            const glm::vec2 uv = selectUvSet(hit.uv, hit.uvSetMask, material.baseColorTexcoordSet);
+            const float alpha = evaluateMaterialAlphaFromUv(material, uv, textures, texturePixels);
             if (alpha < material.alphaCutoff)
             {
-                currentRay.origin = offsetRayOriginAlongDirection(hit.point, currentRay.direction, 8.0f);
+                currentRay.origin = offsetRayOriginAlongDirection(
+                    hit.point,
+                    currentRay.direction,
+                    RENDER_CONFIG_THIN_SURFACE_DIRECTION_OFFSET_SCALE);
                 remainingDistance -= hit.t;
                 ignoreTriangleIndex = hit.triangleIndex;
                 continue;
             }
         }
+        else if (material.alphaMode == 2)
+        {
+            const glm::vec2 uv = selectUvSet(hit.uv, hit.uvSetMask, material.baseColorTexcoordSet);
+            const float alpha = glm::clamp(evaluateMaterialAlphaFromUv(material, uv, textures, texturePixels), 0.0f, 1.0f);
+            const float transmission = glm::clamp(material.transmissionFactor, 0.0f, 1.0f);
+            const float blockedFraction = alpha * (1.0f - transmission);
+            transmittance *= glm::vec3(1.0f - blockedFraction);
+            if (maxComponent(transmittance) <= EPSILON)
+            {
+                return glm::vec3(0.0f);
+            }
+            currentRay.origin = offsetRayOriginAlongDirection(
+                hit.point,
+                currentRay.direction,
+                RENDER_CONFIG_THIN_SURFACE_DIRECTION_OFFSET_SCALE);
+            remainingDistance -= hit.t;
+            ignoreTriangleIndex = hit.triangleIndex;
+            continue;
+        }
 
         return glm::vec3(0.0f);
     }
 
-    return remainingDistance > MIN_INTERSECTION_T ? glm::vec3(0.0f) : glm::vec3(1.0f);
+    return remainingDistance > MIN_INTERSECTION_T ? transmittance : glm::vec3(1.0f);
 }
 
 __device__ bool applyRussianRoulette(
@@ -1734,8 +1906,8 @@ __device__ bool applyRussianRoulette(
 {
     float survivalProbability = glm::clamp(
         maxComponent(pathSegment.color),
-        kMinRussianRouletteSurvival,
-        kMaxRussianRouletteSurvival);
+        RENDER_CONFIG_MIN_RUSSIAN_ROULETTE_SURVIVAL,
+        RENDER_CONFIG_MAX_RUSSIAN_ROULETTE_SURVIVAL);
     thrust::uniform_real_distribution<float> u01(0, 1);
     if (u01(rng) > survivalProbability)
     {
@@ -1766,9 +1938,9 @@ __global__ void shadeMaterialPaths(
     const TextureData* textures,
     const glm::vec4* texturePixels,
     EnvironmentSettings environment,
-    const float* environmentMarginalCdf,
-    const float* environmentConditionalCdf,
     const float* environmentTexelPmf,
+    const float* environmentAliasProb,
+    const int* environmentAliasIndex,
     int environmentWidth,
     int environmentHeight,
     const int* lightGeomIndices,
@@ -1788,19 +1960,56 @@ __global__ void shadeMaterialPaths(
 
         if (intersection.t > 0.0f) {
             const Material& material = materials[intersection.materialId];
-            Material shadingMaterial = evaluateShadingMaterial(material, intersection, textures, texturePixels);
-            const float materialAlpha = evaluateMaterialAlpha(material, intersection, textures, texturePixels);
+            glm::vec4 baseColorSample(1.0f);
+            const glm::vec4* baseColorSamplePtr = nullptr;
+            if (material.textureId >= 0 && textures != nullptr && texturePixels != nullptr)
+            {
+                const glm::vec2 baseUv = selectUvSet(intersection.uv, intersection.uvSetMask, material.baseColorTexcoordSet);
+                baseColorSample = sampleTexture(textures[material.textureId], baseUv, texturePixels);
+                baseColorSamplePtr = &baseColorSample;
+            }
 
-            if (material.alphaMode == 1 && materialAlpha < material.alphaCutoff)
+            thrust::default_random_engine rng = makeSeededRandomEngine(
+                iter,
+                pathSegment.pixelIndex,
+                pathSegment.remainingBounces);
+
+            if (material.alphaMode == 1
+                && evaluateMaterialAlpha(material, intersection, textures, texturePixels, baseColorSamplePtr) < material.alphaCutoff)
             {
                 const glm::vec3 hitPoint = pathSegment.ray.origin + intersection.t * pathSegment.ray.direction;
-                pathSegment.ray.origin = offsetRayOriginAlongDirection(hitPoint, pathSegment.ray.direction, 8.0f);
+                pathSegment.ray.origin = offsetRayOriginAlongDirection(
+                    hitPoint,
+                    pathSegment.ray.direction,
+                    RENDER_CONFIG_THIN_SURFACE_DIRECTION_OFFSET_SCALE);
                 pathSegment.lastBounceWasDelta = 1;
                 pathSegment.lastBsdfPdf = 1.0f;
                 pathSegment.ignoreTriangleIndex = intersection.triangleIndex;
                 return;
             }
 
+            if (material.alphaMode == 2)
+            {
+                const float alpha = glm::clamp(
+                    evaluateMaterialAlpha(material, intersection, textures, texturePixels, baseColorSamplePtr),
+                    0.0f,
+                    1.0f);
+                thrust::uniform_real_distribution<float> u01(0, 1);
+                if (alpha <= EPSILON || u01(rng) > alpha)
+                {
+                    const glm::vec3 hitPoint = pathSegment.ray.origin + intersection.t * pathSegment.ray.direction;
+                    pathSegment.ray.origin = offsetRayOriginAlongDirection(
+                        hitPoint,
+                        pathSegment.ray.direction,
+                        RENDER_CONFIG_THIN_SURFACE_DIRECTION_OFFSET_SCALE);
+                    pathSegment.lastBounceWasDelta = 1;
+                    pathSegment.lastBsdfPdf = 1.0f;
+                    pathSegment.ignoreTriangleIndex = intersection.triangleIndex;
+                    return;
+                }
+            }
+
+            Material shadingMaterial = evaluateShadingMaterial(material, intersection, textures, texturePixels, baseColorSamplePtr);
             intersection.surfaceNormal = evaluateShadingNormal(material, intersection, textures, texturePixels);
             pathSegment.ignoreTriangleIndex = -1;
 
@@ -1818,8 +2027,10 @@ __global__ void shadeMaterialPaths(
                 return;
             }
 
+            const glm::vec3 emission = evaluateMaterialEmission(material, intersection, textures, texturePixels);
+
             // If the material indicates that the object was a light, "light" the ray
-            if (material.emittance > 0.0f) {
+            if (glm::length2(emission) > 0.0f) {
                 float misWeight = 1.0f;
                 if (!pathSegment.lastBounceWasDelta && lightGeomCount > 0 && intersection.geomId >= 0) {
                     const Geom& lightGeom = geoms[intersection.geomId];
@@ -1841,15 +2052,11 @@ __global__ void shadeMaterialPaths(
                     }
                 }
 
-                pathSegment.color *= (shadingMaterial.color * material.emittance * misWeight);
+                pathSegment.color *= (emission * misWeight);
                 image[pathSegment.pixelIndex] += pathSegment.color;
                 pathSegment.remainingBounces = 0;
             }
             else {
-                thrust::default_random_engine rng = makeSeededRandomEngine(
-                    iter,
-                    pathSegment.pixelIndex,
-                    pathSegment.remainingBounces);
                 glm::vec3 intersect = pathSegment.ray.origin + intersection.t * pathSegment.ray.direction;
                 glm::vec3 geometricNormal = intersection.geometricNormal;
                 glm::vec3 shadingNormal = intersection.surfaceNormal;
@@ -1905,7 +2112,10 @@ __global__ void shadeMaterialPaths(
                                 if (cosSurface > 0.0f && cosLight > 0.0f) {
                                     Ray shadowRay;
                                     shadowRay.origin = (shadingMaterial.doubleSided && material.alphaMode == 1)
-                                        ? offsetRayOriginAlongDirection(intersect, wi, 8.0f)
+                                        ? offsetRayOriginAlongDirection(
+                                            intersect,
+                                            wi,
+                                            RENDER_CONFIG_THIN_SURFACE_DIRECTION_OFFSET_SCALE)
                                         : offsetRayOrigin(intersect, geometricNormal, wi);
                                     shadowRay.direction = wi;
 
@@ -1954,9 +2164,9 @@ __global__ void shadeMaterialPaths(
                     if (hasEnvironmentImportanceSampling(
                             environment,
                             textures,
-                            environmentMarginalCdf,
-                            environmentConditionalCdf,
                             environmentTexelPmf,
+                            environmentAliasProb,
+                            environmentAliasIndex,
                             environmentWidth,
                             environmentHeight))
                     {
@@ -1968,9 +2178,9 @@ __global__ void shadeMaterialPaths(
                                 environment,
                                 textures,
                                 texturePixels,
-                                environmentMarginalCdf,
-                                environmentConditionalCdf,
                                 environmentTexelPmf,
+                                environmentAliasProb,
+                                environmentAliasIndex,
                                 environmentWidth,
                                 environmentHeight,
                                 envWi,
@@ -1982,7 +2192,10 @@ __global__ void shadeMaterialPaths(
                             {
                                 Ray shadowRay;
                                 shadowRay.origin = (shadingMaterial.doubleSided && material.alphaMode == 1)
-                                    ? offsetRayOriginAlongDirection(intersect, envWi, 8.0f)
+                                    ? offsetRayOriginAlongDirection(
+                                        intersect,
+                                        envWi,
+                                        RENDER_CONFIG_THIN_SURFACE_DIRECTION_OFFSET_SCALE)
                                     : offsetRayOrigin(intersect, geometricNormal, envWi);
                                 shadowRay.direction = envWi;
 
@@ -2033,7 +2246,10 @@ __global__ void shadeMaterialPaths(
 
 
                 pathSegment.ray.origin = (shadingMaterial.doubleSided && material.alphaMode == 1)
-                    ? offsetRayOriginAlongDirection(intersect, sample.direction, 8.0f)
+                    ? offsetRayOriginAlongDirection(
+                        intersect,
+                        sample.direction,
+                        RENDER_CONFIG_THIN_SURFACE_DIRECTION_OFFSET_SCALE)
                     : offsetRayOrigin(intersect, geometricNormal, sample.direction);
                 pathSegment.ray.direction = sample.direction;
                 pathSegment.ignoreTriangleIndex = (shadingMaterial.doubleSided && material.alphaMode == 1)
@@ -2043,7 +2259,7 @@ __global__ void shadeMaterialPaths(
 
                 int completedBounces = traceDepth - pathSegment.remainingBounces;
                 if (pathSegment.remainingBounces > 0
-                    && completedBounces >= kRussianRouletteStartBounce
+                    && completedBounces >= RENDER_CONFIG_RUSSIAN_ROULETTE_START_BOUNCE
                     && !pathSegment.lastBounceWasDelta)
                 {
                     applyRussianRoulette(pathSegment, rng);
@@ -2089,13 +2305,13 @@ void pathtrace(uchar4* pbo, int frame, int iter)
     const int triangleBvhNodeCount = static_cast<int>(hst_scene->triangleBvhNodes.size());
 
     // 2D block for generating ray from camera
-    const dim3 blockSize2d(8, 8);
+    const dim3 blockSize2d(RENDER_CONFIG_CAMERA_BLOCK_SIZE_X, RENDER_CONFIG_CAMERA_BLOCK_SIZE_Y);
     const dim3 blocksPerGrid2d(
         (cam.resolution.x + blockSize2d.x - 1) / blockSize2d.x,
         (cam.resolution.y + blockSize2d.y - 1) / blockSize2d.y);
 
     // 1D block for path tracing
-    const int blockSize1d = 128;
+    const int blockSize1d = RENDER_CONFIG_PATH_TRACE_BLOCK_SIZE_1D;
     // Initialize array of path rays (using rays that come out of the camera)
     // You can pass the Camera object to that kernel.
     // Each path ray must carry at minimum a (ray, color) pair,
@@ -2107,6 +2323,7 @@ void pathtrace(uchar4* pbo, int frame, int iter)
     PathSegment* dev_path_end = dev_paths + pixelcount;
     int num_paths = static_cast<int>(dev_path_end - dev_paths);
     const bool useMaterialSort = (guiData != NULL) && guiData->UseMaterialSort;
+    const bool enableKernelTiming = (guiData != NULL) && guiData->EnableKernelTiming;
     const int sortEveryNIterations =
         (guiData != NULL && guiData->SortEveryNIterations > 0) ? guiData->SortEveryNIterations : 1;
     const int sortMaxBounce =
@@ -2118,8 +2335,11 @@ void pathtrace(uchar4* pbo, int frame, int iter)
     int totalShadedPaths = 0;
     std::vector<std::pair<cudaEvent_t, cudaEvent_t>> sortTimings;
     std::vector<std::pair<cudaEvent_t, cudaEvent_t>> shadeTimings;
-    sortTimings.reserve(traceDepth);
-    shadeTimings.reserve(traceDepth);
+    if (enableKernelTiming)
+    {
+        sortTimings.reserve(traceDepth);
+        shadeTimings.reserve(traceDepth);
+    }
 
     auto createTimingRange = []() {
         cudaEvent_t start = nullptr;
@@ -2168,8 +2388,12 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             && shouldSortThisPathCount
             && num_paths > 1)
         {
-            const auto sortTiming = createTimingRange();
-            checkCUDAResult(cudaEventRecord(sortTiming.first), "record sort start event");
+            std::pair<cudaEvent_t, cudaEvent_t> sortTiming{};
+            if (enableKernelTiming)
+            {
+                sortTiming = createTimingRange();
+                checkCUDAResult(cudaEventRecord(sortTiming.first), "record sort start event");
+            }
             dim3 numblocksSort = (num_paths + blockSize1d - 1) / blockSize1d;
             computeMaterialSortKeys<<<numblocksSort, blockSize1d>>>(
                 num_paths,
@@ -2182,15 +2406,37 @@ void pathtrace(uchar4* pbo, int frame, int iter)
                 thrust::device,
                 dev_materialSortKeys,
                 dev_materialSortKeys + num_paths,
-                thrust::make_zip_iterator(thrust::make_tuple(dev_paths, dev_intersections))
+                dev_paths
             );
             checkCUDAError("sort paths by material");
-            checkCUDAResult(cudaEventRecord(sortTiming.second), "record sort stop event");
-            sortTimings.push_back(sortTiming);
+            if (enableKernelTiming)
+            {
+                checkCUDAResult(cudaEventRecord(sortTiming.second), "record sort stop event");
+                sortTimings.push_back(sortTiming);
+            }
+
+            computeIntersections<<<numblocksPathSegmentTracing, blockSize1d>>>(
+                num_paths,
+                dev_paths,
+                dev_geoms,
+                dev_meshInstances,
+                dev_scenePrimitives,
+                dev_sceneBvhNodes,
+                sceneBvhNodeCount,
+                dev_triangles,
+                dev_triangleBvhNodes,
+                triangleBvhNodeCount,
+                dev_intersections
+            );
+            checkCUDAError("retrace sorted paths");
         }
 
-        const auto shadeTiming = createTimingRange();
-        checkCUDAResult(cudaEventRecord(shadeTiming.first), "record shade start event");
+        std::pair<cudaEvent_t, cudaEvent_t> shadeTiming{};
+        if (enableKernelTiming)
+        {
+            shadeTiming = createTimingRange();
+            checkCUDAResult(cudaEventRecord(shadeTiming.first), "record shade start event");
+        }
         shadeMaterialPaths<<<numblocksPathSegmentTracing, blockSize1d>>>(
             iter,
             num_paths,
@@ -2210,9 +2456,9 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             dev_textures,
             dev_texturePixels,
             hst_scene->state.environment,
-            dev_environmentMarginalCdf,
-            dev_environmentConditionalCdf,
             dev_environmentTexelPmf,
+            dev_environmentAliasProb,
+            dev_environmentAliasIndex,
             dev_environmentWidth,
             dev_environmentHeight,
             dev_lightGeomIndices,
@@ -2222,8 +2468,11 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             dev_image
         );
         checkCUDAError("compute shading");
-        checkCUDAResult(cudaEventRecord(shadeTiming.second), "record shade stop event");
-        shadeTimings.push_back(shadeTiming);
+        if (enableKernelTiming)
+        {
+            checkCUDAResult(cudaEventRecord(shadeTiming.second), "record shade stop event");
+            shadeTimings.push_back(shadeTiming);
+        }
 
         // Stream compact terminated paths.
         PathSegment* new_end = thrust::remove_if(
@@ -2255,15 +2504,6 @@ void pathtrace(uchar4* pbo, int frame, int iter)
         exposureValue,
         toneMapMode);
 
-    // Retrieve image from GPU
-    checkCUDAResult(
-        cudaMemcpy(
-            hst_scene->state.image.data(),
-            dev_image,
-            pixelcount * sizeof(glm::vec3),
-            cudaMemcpyDeviceToHost),
-        "copy image from device");
-
     auto accumulateTimingRanges =
         [](std::vector<std::pair<cudaEvent_t, cudaEvent_t>>& ranges, float& totalMs, const char* label) {
             for (const auto& range : ranges)
@@ -2276,11 +2516,13 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             }
         };
 
-    accumulateTimingRanges(sortTimings, totalSortTimeMs, "measure sort elapsed time");
-    accumulateTimingRanges(shadeTimings, totalShadeTimeMs, "measure shade elapsed time");
-
     if (guiData != NULL)
     {
+        if (enableKernelTiming)
+        {
+            accumulateTimingRanges(sortTimings, totalSortTimeMs, "measure sort elapsed time");
+            accumulateTimingRanges(shadeTimings, totalShadeTimeMs, "measure shade elapsed time");
+        }
         guiData->LastSortTimeMs = totalSortTimeMs;
         guiData->LastShadeTimeMs = totalShadeTimeMs;
         guiData->LastNumShadedPaths = totalShadedPaths;
@@ -2288,16 +2530,6 @@ void pathtrace(uchar4* pbo, int frame, int iter)
 
     checkCUDAError("pathtrace");
 }
-
-
-
-
-
-
-
-
-
-
 
 
 

@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+constexpr int MAX_TEXTURE_UV_SETS = 3;
+
 enum GeomType
 {
     SPHERE,
@@ -47,15 +49,15 @@ struct Triangle
     glm::vec3 n1;
     glm::vec3 n2;
     glm::vec3 geometricNormal;
-    glm::vec2 uv0;
-    glm::vec2 uv1;
-    glm::vec2 uv2;
+    glm::vec2 uv0[MAX_TEXTURE_UV_SETS];
+    glm::vec2 uv1[MAX_TEXTURE_UV_SETS];
+    glm::vec2 uv2[MAX_TEXTURE_UV_SETS];
     glm::vec4 t0;
     glm::vec4 t1;
     glm::vec4 t2;
     int materialId;
     int hasVertexNormals;
-    int hasUVs;
+    int uvSetMask;
     int hasVertexTangents;
 };
 
@@ -67,6 +69,7 @@ struct TextureData
     int flipV;
     int wrapS;
     int wrapT;
+    int isConstantOpaque;
 };
 
 struct TriangleBvhNode
@@ -115,18 +118,32 @@ struct Material
 {
     glm::vec3 color;
     glm::vec3 specularColor;
+    glm::vec3 emissiveColor;
     float roughness;
     float metallic;
+    float baseAlpha;
     float alphaCutoff;
     float hasReflective;
     float hasRefractive;
     float indexOfRefraction;
     float emittance;
+    float transmissionFactor;
+    float clearcoatFactor;
+    float clearcoatRoughness;
+    float occlusionStrength;
     int alphaMode;
     int doubleSided;
+    int thinWalled;
     int textureId;
     int metallicRoughnessTextureId;
     int normalTextureId;
+    int emissiveTextureId;
+    int occlusionTextureId;
+    int baseColorTexcoordSet;
+    int metallicRoughnessTexcoordSet;
+    int normalTexcoordSet;
+    int emissiveTexcoordSet;
+    int occlusionTexcoordSet;
     float normalTextureScale;
 };
 
@@ -179,9 +196,11 @@ struct ShadeableIntersection
     float t;
     glm::vec3 surfaceNormal;
     glm::vec3 geometricNormal;
-    glm::vec3 tangent;
-    float tangentSign;
-    glm::vec2 uv;
+    glm::vec3 tangents[MAX_TEXTURE_UV_SETS];
+    float tangentSigns[MAX_TEXTURE_UV_SETS];
+    int tangentSetMask;
+    glm::vec2 uv[MAX_TEXTURE_UV_SETS];
+    int uvSetMask;
     int materialId;
     int triangleIndex;
     int geomId;

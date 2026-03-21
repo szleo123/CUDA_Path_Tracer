@@ -27,6 +27,7 @@ __host__ __device__ void computeLobeProbabilities(
     const Material& m,
     float& pDiffuse,
     float& pReflect,
+    float& pClearcoat,
     float& pRefract);
 
 __host__ __device__ bool materialHasNonDeltaBsdf(const Material& material);

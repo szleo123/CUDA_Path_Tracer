@@ -29,6 +29,7 @@ struct SceneImportContext
     std::unordered_map<std::string, uint32_t>& texturePathToId;
     std::unordered_map<std::string, uint32_t>& importedMaterialKeyToId;
     std::vector<Material>& materials;
+    std::vector<std::string>& materialNames;
     std::vector<TextureData>& textures;
     std::vector<glm::vec4>& texturePixels;
 };
@@ -309,6 +310,16 @@ std::string importedMaterialKey(
         : (material.normalTexturePath.empty()
             ? std::string()
             : std::filesystem::weakly_canonical(material.normalTexturePath).string());
+    const std::string emissiveTextureKey = !material.emissiveTextureKey.empty()
+        ? material.emissiveTextureKey
+        : (material.emissiveTexturePath.empty()
+            ? std::string()
+            : std::filesystem::weakly_canonical(material.emissiveTexturePath).string());
+    const std::string occlusionTextureKey = !material.occlusionTextureKey.empty()
+        ? material.occlusionTextureKey
+        : (material.occlusionTexturePath.empty()
+            ? std::string()
+            : std::filesystem::weakly_canonical(material.occlusionTexturePath).string());
     return meshPath.string()
         + "|"
         + material.name
@@ -319,9 +330,37 @@ std::string importedMaterialKey(
         + "|"
         + std::to_string(material.diffuseColor.b)
         + "|"
+        + std::to_string(material.baseAlpha)
+        + "|"
         + std::to_string(material.metallicFactor)
         + "|"
         + std::to_string(material.roughnessFactor)
+        + "|"
+        + std::to_string(material.indexOfRefraction)
+        + "|"
+        + std::to_string(material.emissiveFactor.r)
+        + "|"
+        + std::to_string(material.emissiveFactor.g)
+        + "|"
+        + std::to_string(material.emissiveFactor.b)
+        + "|"
+        + std::to_string(material.emissiveStrength)
+        + "|"
+        + std::to_string(material.transmissionFactor)
+        + "|"
+        + std::to_string(material.clearcoatFactor)
+        + "|"
+        + std::to_string(material.clearcoatRoughnessFactor)
+        + "|"
+        + std::to_string(material.specularFactor)
+        + "|"
+        + std::to_string(material.specularFactorColor.r)
+        + "|"
+        + std::to_string(material.specularFactorColor.g)
+        + "|"
+        + std::to_string(material.specularFactorColor.b)
+        + "|"
+        + std::to_string(material.hasExplicitSpecularColor)
         + "|"
         + diffuseTextureKey
         + "|"
@@ -329,13 +368,25 @@ std::string importedMaterialKey(
         + "|"
         + normalTextureKey
         + "|"
+        + emissiveTextureKey
+        + "|"
+        + occlusionTextureKey
+        + "|"
         + std::to_string(material.diffuseTexcoordSet)
         + "|"
         + std::to_string(material.metallicRoughnessTexcoordSet)
         + "|"
         + std::to_string(material.normalTexcoordSet)
         + "|"
+        + std::to_string(material.emissiveTexcoordSet)
+        + "|"
+        + std::to_string(material.occlusionTexcoordSet)
+        + "|"
         + std::to_string(material.normalTextureScale)
+        + "|"
+        + std::to_string(material.occlusionStrength)
+        + "|"
+        + std::to_string(material.thinWalled)
         + "|"
         + std::to_string(material.flipV ? 1 : 0)
         + "|"
@@ -344,6 +395,18 @@ std::string importedMaterialKey(
         + std::to_string(material.wrapT)
         + "|"
         + std::to_string(material.doubleSided);
+}
+
+static glm::vec3 dielectricF0FromIor(
+    float indexOfRefraction,
+    float specularFactor,
+    const glm::vec3& specularFactorColor)
+{
+    const float clampedIor = glm::max(indexOfRefraction, 1.0f);
+    const float numerator = clampedIor - 1.0f;
+    const float denominator = clampedIor + 1.0f;
+    const float baseF0 = (denominator > EPSILON) ? ((numerator * numerator) / (denominator * denominator)) : 0.04f;
+    return glm::clamp(glm::vec3(baseF0) * specularFactor * specularFactorColor, glm::vec3(0.0f), glm::vec3(1.0f));
 }
 
 int ensureImportedTextureLoaded(
@@ -423,6 +486,7 @@ int registerImportedMaterial(
     std::unordered_map<std::string, uint32_t>& importedMaterialKeyToId,
     std::unordered_map<std::string, uint32_t>& texturePathToId,
     std::vector<Material>& materials,
+    std::vector<std::string>& materialNames,
     std::vector<TextureData>& textures,
     std::vector<glm::vec4>& texturePixels)
 {
@@ -435,14 +499,42 @@ int registerImportedMaterial(
 
     Material material = baseMaterial;
     material.color = importedMaterial.diffuseColor;
-    material.specularColor = importedMaterial.specularColor;
+    material.baseAlpha = importedMaterial.baseAlpha;
+    material.indexOfRefraction = importedMaterial.indexOfRefraction;
+    material.specularColor = importedMaterial.hasExplicitSpecularColor
+        ? glm::clamp(
+            importedMaterial.specularColor * importedMaterial.specularFactor * importedMaterial.specularFactorColor,
+            glm::vec3(0.0f),
+            glm::vec3(1.0f))
+        : dielectricF0FromIor(
+            importedMaterial.indexOfRefraction,
+            importedMaterial.specularFactor,
+            importedMaterial.specularFactorColor);
+    material.emissiveColor = importedMaterial.emissiveFactor;
     material.roughness = importedMaterial.roughnessFactor;
     material.metallic = importedMaterial.metallicFactor;
     material.alphaMode = importedMaterial.alphaMode;
     material.alphaCutoff = importedMaterial.alphaCutoff;
     material.doubleSided = importedMaterial.doubleSided;
+    material.thinWalled = importedMaterial.thinWalled;
     material.normalTextureScale = importedMaterial.normalTextureScale;
+    material.baseColorTexcoordSet = importedMaterial.diffuseTexcoordSet;
+    material.metallicRoughnessTexcoordSet = importedMaterial.metallicRoughnessTexcoordSet;
+    material.normalTexcoordSet = importedMaterial.normalTexcoordSet;
+    material.emissiveTexcoordSet = importedMaterial.emissiveTexcoordSet;
+    material.occlusionTexcoordSet = importedMaterial.occlusionTexcoordSet;
+    material.transmissionFactor = importedMaterial.transmissionFactor;
+    material.clearcoatFactor = importedMaterial.clearcoatFactor;
+    material.clearcoatRoughness = importedMaterial.clearcoatRoughnessFactor;
+    material.occlusionStrength = importedMaterial.occlusionStrength;
     material.hasReflective = fmaxf(material.hasReflective, importedMaterial.metallicFactor);
+    material.hasRefractive = fmaxf(material.hasRefractive, importedMaterial.transmissionFactor);
+    if (glm::length(importedMaterial.emissiveFactor) > 0.0f
+        || !importedMaterial.emissiveTextureBytes.empty()
+        || !importedMaterial.emissiveTexturePath.empty())
+    {
+        material.emittance = importedMaterial.emissiveStrength;
+    }
     material.textureId = ensureImportedTextureLoaded(
         importedMaterial.diffuseTexturePath,
         importedMaterial.diffuseTextureKey,
@@ -476,10 +568,33 @@ int registerImportedMaterial(
         texturePathToId,
         textures,
         texturePixels);
+    material.emissiveTextureId = ensureImportedTextureLoaded(
+        importedMaterial.emissiveTexturePath,
+        importedMaterial.emissiveTextureKey,
+        importedMaterial.emissiveTextureBytes,
+        importedMaterial.flipV,
+        true,
+        importedMaterial.wrapS,
+        importedMaterial.wrapT,
+        texturePathToId,
+        textures,
+        texturePixels);
+    material.occlusionTextureId = ensureImportedTextureLoaded(
+        importedMaterial.occlusionTexturePath,
+        importedMaterial.occlusionTextureKey,
+        importedMaterial.occlusionTextureBytes,
+        importedMaterial.flipV,
+        false,
+        importedMaterial.wrapS,
+        importedMaterial.wrapT,
+        texturePathToId,
+        textures,
+        texturePixels);
 
     const int materialId = static_cast<int>(materials.size());
     importedMaterialKeyToId[key] = static_cast<uint32_t>(materialId);
     materials.push_back(material);
+    materialNames.push_back(importedMaterial.name.empty() ? ("Imported Material " + std::to_string(materialId)) : importedMaterial.name);
     return materialId;
 }
 
@@ -494,10 +609,20 @@ Material parseMaterialDefinition(
     material.textureId = -1;
     material.metallicRoughnessTextureId = -1;
     material.normalTextureId = -1;
+    material.emissiveTextureId = -1;
+    material.occlusionTextureId = -1;
     material.alphaMode = 0;
     material.doubleSided = 0;
+    material.thinWalled = 0;
+    material.baseAlpha = 1.0f;
     material.alphaCutoff = 0.5f;
     material.normalTextureScale = 1.0f;
+    material.baseColorTexcoordSet = 0;
+    material.metallicRoughnessTexcoordSet = 0;
+    material.normalTexcoordSet = 0;
+    material.emissiveTexcoordSet = 0;
+    material.occlusionTexcoordSet = 0;
+    material.occlusionStrength = 1.0f;
 
     glm::vec3 baseColor(1.0f);
     if (materialJson.contains("RGB"))
@@ -507,6 +632,7 @@ Material parseMaterialDefinition(
     }
 
     material.color = baseColor;
+    material.emissiveColor = glm::vec3(0.0f);
     material.specularColor = glm::vec3(0.04f);
     material.roughness = materialJson.value("ROUGHNESS", 0.0f);
     material.metallic = materialJson.value("METALLIC", 0.0f);
@@ -544,6 +670,7 @@ Material parseMaterialDefinition(
     else if (matType == "Emitting")
     {
         material.emittance = materialJson["EMITTANCE"];
+        material.emissiveColor = material.color;
     }
     else if (matType == "Specular")
     {
@@ -571,6 +698,7 @@ void remapMeshTriangleMaterials(
     std::unordered_map<std::string, uint32_t>& importedMaterialKeyToId,
     std::unordered_map<std::string, uint32_t>& texturePathToId,
     std::vector<Material>& materials,
+    std::vector<std::string>& materialNames,
     std::vector<TextureData>& textures,
     std::vector<glm::vec4>& texturePixels)
 {
@@ -596,6 +724,7 @@ void remapMeshTriangleMaterials(
             importedMaterialKeyToId,
             texturePathToId,
             materials,
+            materialNames,
             textures,
             texturePixels);
     }
@@ -645,6 +774,7 @@ void initializeMeshObject(
         importContext.importedMaterialKeyToId,
         importContext.texturePathToId,
         importContext.materials,
+        importContext.materialNames,
         importContext.textures,
         importContext.texturePixels);
 
@@ -680,6 +810,7 @@ void loadMaterialsFromJson(const json& materialsData, const SceneImportContext& 
 
         importContext.materialNameToId[name] = static_cast<uint32_t>(importContext.materials.size());
         importContext.materials.push_back(material);
+        importContext.materialNames.push_back(name);
     }
 }
 
@@ -925,35 +1056,16 @@ void Scene::updateObjectTransform(
     rebuildRenderData();
 }
 
-void Scene::updateObjectMaterialProperties(
-    size_t objectIndex,
-    float roughness,
-    float metallic)
+void Scene::updateMaterial(
+    size_t materialIndex,
+    const Material& material)
 {
-    if (objectIndex >= objects.size())
+    if (materialIndex >= materials.size())
     {
         return;
     }
 
-    SceneObject& object = objects[objectIndex];
-    for (const int materialId : object.usedMaterialIds)
-    {
-        if (materialId < 0 || materialId >= static_cast<int>(materials.size()))
-        {
-            continue;
-        }
-
-        Material& material = materials[materialId];
-        if (material.emittance > 0.0f || material.hasRefractive > 0.0f)
-        {
-            continue;
-        }
-
-        material.roughness = roughness;
-        material.metallic = metallic;
-        material.hasReflective = fmaxf(material.hasReflective, metallic);
-    }
-
+    materials[materialIndex] = material;
     gpuDynamicDataDirty = true;
 }
 
@@ -976,6 +1088,7 @@ void Scene::loadFromJSON(const std::string& jsonName)
         texturePathToId,
         importedMaterialKeyToId,
         materials,
+        materialNames,
         textures,
         texturePixels
     };

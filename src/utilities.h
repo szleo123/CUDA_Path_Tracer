@@ -1,5 +1,6 @@
 #pragma once
 
+#include "renderConfig.h"
 #include "glm/glm.hpp"
 
 #include <algorithm>
@@ -13,9 +14,9 @@
 #define PI                3.1415926535897932384626422832795028841971f
 #define TWO_PI            6.2831853071795864769252867665590057683943f
 #define SQRT_OF_ONE_THIRD 0.5773502691896257645091487805019574556476f
-#define EPSILON           0.00001f
-#define MIN_INTERSECTION_T 0.0001f
-#define RAY_ORIGIN_BIAS   0.001f
+#define EPSILON           RENDER_CONFIG_EPSILON
+#define MIN_INTERSECTION_T RENDER_CONFIG_MIN_INTERSECTION_T
+#define RAY_ORIGIN_BIAS   RENDER_CONFIG_RAY_ORIGIN_BIAS
 
 #ifdef __CUDACC__
 #define CUDA_INLINE __host__ __device__ inline
@@ -85,9 +86,10 @@ public:
     GuiDataContainer()
         : TracedDepth(0)
         , UseMaterialSort(false)
-        , SortEveryNIterations(4)
-        , SortMaxBounce(2)
-        , SortMinPathCount(32768)
+        , EnableKernelTiming(false)
+        , SortEveryNIterations(RENDER_CONFIG_DEFAULT_SORT_EVERY_N_ITERATIONS)
+        , SortMaxBounce(RENDER_CONFIG_DEFAULT_SORT_MAX_BOUNCE)
+        , SortMinPathCount(RENDER_CONFIG_DEFAULT_SORT_MIN_PATH_COUNT)
         , LastSortTimeMs(0.0f)
         , LastShadeTimeMs(0.0f)
         , LastNumShadedPaths(0)
@@ -97,6 +99,7 @@ public:
     {}
     int TracedDepth;
     bool UseMaterialSort;
+    bool EnableKernelTiming;
     int SortEveryNIterations;
     int SortMaxBounce;
     int SortMinPathCount;

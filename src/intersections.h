@@ -47,6 +47,8 @@ __host__ __device__ float triangleIntersectionTest(
     glm::vec3& intersectionPoint,
     glm::vec3& shadingNormal,
     glm::vec3& geometricNormal,
-    glm::vec2& uv,
-    glm::vec3& tangent,
-    float& tangentSign);
+    glm::vec2 uv[MAX_TEXTURE_UV_SETS],
+    int& uvSetMask,
+    glm::vec3 tangents[MAX_TEXTURE_UV_SETS],
+    float tangentSigns[MAX_TEXTURE_UV_SETS],
+    int& tangentSetMask);

@@ -20,6 +20,7 @@
 #include <cuda_gl_interop.h>
 
 #include <cmath>
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -65,6 +66,7 @@ GuiDataContainer* imguiData = NULL;
 ImGuiIO* io = nullptr;
 bool mouseOverImGuiWindow = false;
 static int selectedObjectIndex = -1;
+static int selectedMaterialId = -1;
 static float rightSidebarWidth = 380.0f;
 static float renderViewportWindowWidth = 0.0f;
 static float renderViewportWindowHeight = 0.0f;
@@ -96,10 +98,16 @@ void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods
 void mousePositionCallback(GLFWwindow* window, double xpos, double ypos);
 void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods);
 
+struct PickResult
+{
+    int objectIndex = -1;
+    int materialId = -1;
+};
+
 namespace
 {
 void applyObjectTransform(int objectIndex, const glm::vec3& translation, const glm::vec3& rotation, const glm::vec3& scale);
-void applyObjectMaterialProperties(int objectIndex, float roughness, float metallic);
+void applyMaterialProperties(int materialId, const Material& material);
 
 bool isInspectorVisible()
 {
@@ -163,38 +171,190 @@ bool mapWindowToRenderPixel(double xpos, double ypos, float& renderX, float& ren
     return true;
 }
 
-bool isEditableSurfaceMaterial(const Material& material)
+bool objectUsesMaterial(const SceneObject& object, int materialId)
 {
-    return material.emittance <= 0.0f
-        && material.hasRefractive <= 0.0f
-        && material.hasReflective > 0.0f;
+    return std::find(object.usedMaterialIds.begin(), object.usedMaterialIds.end(), materialId) != object.usedMaterialIds.end();
 }
 
-bool findEditableObjectMaterialRange(const SceneObject& object, float& roughness, float& metallic)
+int getDefaultMaterialIdForObject(const SceneObject& object)
 {
-    bool foundMaterial = false;
-    for (const int materialId : object.usedMaterialIds)
+    if (!object.usedMaterialIds.empty())
     {
-        if (materialId < 0 || materialId >= static_cast<int>(scene->materials.size()))
-        {
-            continue;
-        }
+        return object.usedMaterialIds.front();
+    }
 
-        const Material& material = scene->materials[materialId];
-        if (!isEditableSurfaceMaterial(material))
-        {
-            continue;
-        }
+    return object.materialId;
+}
 
-        if (!foundMaterial)
+void syncSelectedMaterialToObject()
+{
+    if (scene == nullptr
+        || selectedObjectIndex < 0
+        || selectedObjectIndex >= static_cast<int>(scene->objects.size()))
+    {
+        selectedMaterialId = -1;
+        return;
+    }
+
+    const SceneObject& object = scene->objects[selectedObjectIndex];
+    if (selectedMaterialId >= 0 && objectUsesMaterial(object, selectedMaterialId))
+    {
+        return;
+    }
+
+    selectedMaterialId = getDefaultMaterialIdForObject(object);
+}
+
+const char* getMaterialDisplayName(int materialId)
+{
+    if (scene == nullptr
+        || materialId < 0
+        || materialId >= static_cast<int>(scene->materialNames.size()))
+    {
+        return "Unknown Material";
+    }
+
+    return scene->materialNames[materialId].c_str();
+}
+
+bool hasNonZeroColor(const glm::vec3& color)
+{
+    return glm::dot(color, color) > 1.0e-8f;
+}
+
+bool editMaterialControls(Material& material)
+{
+    bool changed = false;
+
+    const bool hasEmission =
+        material.emittance > 0.0f
+        || hasNonZeroColor(material.emissiveColor)
+        || material.emissiveTextureId >= 0;
+    const bool hasTransmission =
+        material.transmissionFactor > 0.0f
+        || material.hasRefractive > 0.0f
+        || material.thinWalled != 0;
+    const bool hasClearcoat = material.clearcoatFactor > 0.0f;
+    const bool hasSpecular =
+        material.hasReflective > 0.0f
+        || material.metallic > 0.0f
+        || hasTransmission
+        || hasClearcoat;
+    const bool hasAlphaControls =
+        material.alphaMode != 0
+        || material.baseAlpha < 1.0f;
+    const bool hasNormalControls = material.normalTextureId >= 0;
+    const bool hasOcclusionControls = material.occlusionTextureId >= 0;
+
+    glm::vec3 baseColor = material.color;
+    glm::vec3 specularColor = material.specularColor;
+    glm::vec3 emissiveColor = material.emissiveColor;
+    changed |= ImGui::ColorEdit3("Base Color", &baseColor[0]);
+
+    bool doubleSided = material.doubleSided != 0;
+    bool thinWalled = material.thinWalled != 0;
+    if (ImGui::Checkbox("Double Sided", &doubleSided))
+    {
+        material.doubleSided = doubleSided ? 1 : 0;
+        changed = true;
+    }
+
+    if (hasSpecular)
+    {
+        ImGui::Separator();
+        ImGui::TextUnformatted("Specular / Surface");
+        changed |= ImGui::ColorEdit3("Specular Color", &specularColor[0]);
+        changed |= ImGui::SliderFloat("Roughness", &material.roughness, 0.0f, 1.0f);
+        changed |= ImGui::SliderFloat("Reflectivity", &material.hasReflective, 0.0f, 1.0f);
+        if (!hasTransmission)
         {
-            roughness = material.roughness;
-            metallic = material.metallic;
-            foundMaterial = true;
+            changed |= ImGui::SliderFloat("Metallic", &material.metallic, 0.0f, 1.0f);
         }
     }
 
-    return foundMaterial;
+    if (hasTransmission)
+    {
+        ImGui::Separator();
+        ImGui::TextUnformatted("Transmission");
+        changed |= ImGui::SliderFloat("Refractivity", &material.hasRefractive, 0.0f, 1.0f);
+        changed |= ImGui::SliderFloat("Transmission", &material.transmissionFactor, 0.0f, 1.0f);
+        changed |= ImGui::SliderFloat("IOR", &material.indexOfRefraction, 1.0f, 3.0f);
+        if (ImGui::Checkbox("Thin Walled", &thinWalled))
+        {
+            material.thinWalled = thinWalled ? 1 : 0;
+            changed = true;
+        }
+    }
+
+    if (hasClearcoat)
+    {
+        ImGui::Separator();
+        ImGui::TextUnformatted("Clearcoat");
+        changed |= ImGui::SliderFloat("Clearcoat", &material.clearcoatFactor, 0.0f, 1.0f);
+        changed |= ImGui::SliderFloat("Clearcoat Roughness", &material.clearcoatRoughness, 0.0f, 1.0f);
+    }
+
+    if (hasEmission)
+    {
+        ImGui::Separator();
+        ImGui::TextUnformatted("Emission");
+        changed |= ImGui::ColorEdit3("Emissive Color", &emissiveColor[0]);
+        changed |= ImGui::DragFloat("Emittance", &material.emittance, 0.05f, 0.0f, 100.0f, "%.3f");
+    }
+
+    if (hasAlphaControls)
+    {
+        ImGui::Separator();
+        ImGui::TextUnformatted("Alpha");
+        changed |= ImGui::SliderFloat("Base Alpha", &material.baseAlpha, 0.0f, 1.0f);
+        changed |= ImGui::SliderFloat("Alpha Cutoff", &material.alphaCutoff, 0.0f, 1.0f);
+
+        const char* alphaModeLabels[] = { "Opaque", "Mask", "Blend" };
+        int alphaMode = glm::clamp(material.alphaMode, 0, 2);
+        if (ImGui::Combo("Alpha Mode", &alphaMode, alphaModeLabels, IM_ARRAYSIZE(alphaModeLabels)))
+        {
+            material.alphaMode = alphaMode;
+            changed = true;
+        }
+    }
+
+    if (hasNormalControls || hasOcclusionControls)
+    {
+        ImGui::Separator();
+        ImGui::TextUnformatted("Texture Factors");
+        if (hasNormalControls)
+        {
+            changed |= ImGui::SliderFloat("Normal Scale", &material.normalTextureScale, 0.0f, 4.0f);
+        }
+        if (hasOcclusionControls)
+        {
+            changed |= ImGui::SliderFloat("Occlusion Strength", &material.occlusionStrength, 0.0f, 1.0f);
+        }
+    }
+
+    if (changed)
+    {
+        material.color = glm::clamp(baseColor, glm::vec3(0.0f), glm::vec3(100.0f));
+        material.specularColor = glm::clamp(specularColor, glm::vec3(0.0f), glm::vec3(1.0f));
+        material.emissiveColor = glm::clamp(emissiveColor, glm::vec3(0.0f), glm::vec3(100.0f));
+        material.roughness = glm::clamp(material.roughness, 0.0f, 1.0f);
+        material.metallic = glm::clamp(material.metallic, 0.0f, 1.0f);
+        material.hasReflective = glm::clamp(material.hasReflective, 0.0f, 1.0f);
+        material.hasRefractive = glm::clamp(material.hasRefractive, 0.0f, 1.0f);
+        material.indexOfRefraction = glm::clamp(material.indexOfRefraction, 1.0f, 3.0f);
+        material.transmissionFactor = glm::clamp(material.transmissionFactor, 0.0f, 1.0f);
+        material.clearcoatFactor = glm::clamp(material.clearcoatFactor, 0.0f, 1.0f);
+        material.clearcoatRoughness = glm::clamp(material.clearcoatRoughness, 0.0f, 1.0f);
+        material.baseAlpha = glm::clamp(material.baseAlpha, 0.0f, 1.0f);
+        material.alphaCutoff = glm::clamp(material.alphaCutoff, 0.0f, 1.0f);
+        material.normalTextureScale = glm::clamp(material.normalTextureScale, 0.0f, 4.0f);
+        material.occlusionStrength = glm::clamp(material.occlusionStrength, 0.0f, 1.0f);
+        material.emittance = glm::max(material.emittance, 0.0f);
+        material.hasReflective = glm::max(material.hasReflective, material.metallic);
+        material.hasRefractive = glm::max(material.hasRefractive, material.transmissionFactor);
+    }
+
+    return changed;
 }
 
 void computeObjectLocalBounds(const SceneObject& object, glm::vec3& outMin, glm::vec3& outMax)
@@ -410,6 +570,8 @@ void renderAnalyticsSection()
         }
     }
 
+    ImGui::Checkbox("Profile CUDA Kernels", &imguiData->EnableKernelTiming);
+
     ImGui::Text("Tone Mapping %s", getToneMapModeLabel(imguiData->ToneMapModeValue));
     ImGui::Text("Exposure %.2f EV", imguiData->ExposureValue);
     ImGui::Text("Render Debug %s", getRenderDebugModeLabel(imguiData->RenderDebugModeValue));
@@ -448,6 +610,7 @@ void renderSceneObjectsSection()
             if (ImGui::Selectable(scene->objects[i].name.c_str(), isSelected))
             {
                 selectedObjectIndex = i;
+                syncSelectedMaterialToObject();
             }
             if (isSelected)
             {
@@ -464,6 +627,7 @@ void renderSceneObjectsSection()
     }
 
     SceneObject& object = scene->objects[selectedObjectIndex];
+    syncSelectedMaterialToObject();
     ImGui::Separator();
     ImGui::Text("Selected: %s", object.name.c_str());
     if (ImGui::Button("Frame Selected"))
@@ -489,26 +653,50 @@ void renderSceneObjectsSection()
         applyObjectTransform(selectedObjectIndex, translation, rotation, scale);
     }
 
-    float roughness = 0.0f;
-    float metallic = 0.0f;
-    if (findEditableObjectMaterialRange(object, roughness, metallic))
+    ImGui::Separator();
+    ImGui::TextUnformatted("Material Slot");
+    if (object.usedMaterialIds.empty())
     {
-        ImGui::Separator();
-        ImGui::TextUnformatted("Material");
-
-        bool materialChanged = false;
-        materialChanged |= ImGui::SliderFloat("Roughness", &roughness, 0.0f, 1.0f);
-        materialChanged |= ImGui::SliderFloat("Metallic", &metallic, 0.0f, 1.0f);
-
-        if (materialChanged)
-        {
-            applyObjectMaterialProperties(selectedObjectIndex, roughness, metallic);
-        }
+        ImGui::TextUnformatted("This object has no material slots.");
+        return;
     }
-    else
+
+    if (ImGui::BeginListBox("Materials"))
     {
-        ImGui::Separator();
-        ImGui::TextUnformatted("Material controls are available for reflective non-light objects.");
+        for (const int materialId : object.usedMaterialIds)
+        {
+            if (materialId < 0 || materialId >= static_cast<int>(scene->materials.size()))
+            {
+                continue;
+            }
+
+            const bool isSelected = (selectedMaterialId == materialId);
+            const std::string label = std::string(getMaterialDisplayName(materialId)) + "##mat_" + std::to_string(materialId);
+            if (ImGui::Selectable(label.c_str(), isSelected))
+            {
+                selectedMaterialId = materialId;
+            }
+            if (isSelected)
+            {
+                ImGui::SetItemDefaultFocus();
+            }
+        }
+        ImGui::EndListBox();
+    }
+
+    if (selectedMaterialId < 0 || selectedMaterialId >= static_cast<int>(scene->materials.size()))
+    {
+        ImGui::TextUnformatted("Select a material slot to edit it.");
+        return;
+    }
+
+    Material editedMaterial = scene->materials[selectedMaterialId];
+    ImGui::Separator();
+    ImGui::Text("Editing: %s", getMaterialDisplayName(selectedMaterialId));
+    ImGui::Text("Material Id: %d", selectedMaterialId);
+    if (editMaterialControls(editedMaterial))
+    {
+        applyMaterialProperties(selectedMaterialId, editedMaterial);
     }
 }
 
@@ -697,7 +885,8 @@ bool traverseTriangleBvhForPicking(
     const MeshInstance& meshInstance,
     const Ray& worldRay,
     float maxDistance,
-    float& outT)
+    float& outT,
+    int& outMaterialId)
 {
     if (meshInstance.bvhRootIndex < 0)
     {
@@ -705,13 +894,14 @@ bool traverseTriangleBvhForPicking(
     }
 
     const Ray localRay = transformRayForPicking(worldRay, meshInstance.inverseTransform);
-    constexpr int kMaxBvhStackSize = 256;
+    constexpr int kMaxBvhStackSize = RENDER_CONFIG_MAX_PICKING_BVH_STACK_SIZE;
     const float maxFloat = std::numeric_limits<float>::max();
     int stack[kMaxBvhStackSize];
     int stackSize = 0;
     stack[stackSize++] = meshInstance.bvhRootIndex;
     bool hit = false;
     outT = maxDistance;
+    outMaterialId = -1;
 
     while (stackSize > 0)
     {
@@ -730,9 +920,11 @@ bool traverseTriangleBvhForPicking(
                 glm::vec3 intersectionPoint;
                 glm::vec3 shadingNormal;
                 glm::vec3 geometricNormal;
-                glm::vec2 uv;
-                glm::vec3 tangent;
-                float tangentSign = 1.0f;
+                glm::vec2 uv[MAX_TEXTURE_UV_SETS];
+                int uvSetMask = 0;
+                glm::vec3 tangents[MAX_TEXTURE_UV_SETS];
+                float tangentSigns[MAX_TEXTURE_UV_SETS];
+                int tangentSetMask = 0;
                 const float localT = triangleIntersectionTest(
                     triangle,
                     localRay,
@@ -740,8 +932,10 @@ bool traverseTriangleBvhForPicking(
                     shadingNormal,
                     geometricNormal,
                     uv,
-                    tangent,
-                    tangentSign);
+                    uvSetMask,
+                    tangents,
+                    tangentSigns,
+                    tangentSetMask);
                 if (localT <= MIN_INTERSECTION_T)
                 {
                     continue;
@@ -752,6 +946,7 @@ bool traverseTriangleBvhForPicking(
                 if (worldT > MIN_INTERSECTION_T && worldT < outT)
                 {
                     outT = worldT;
+                    outMaterialId = triangle.materialId;
                     hit = true;
                 }
             }
@@ -803,27 +998,27 @@ bool traverseTriangleBvhForPicking(
     return hit;
 }
 
-int pickSceneObject(double xpos, double ypos)
+PickResult pickSceneObject(double xpos, double ypos)
 {
+    PickResult result{};
     if (scene == nullptr)
     {
-        return -1;
+        return result;
     }
 
     const Ray ray = buildCameraRay(xpos, ypos);
     if (glm::dot(ray.direction, ray.direction) <= 0.0f)
     {
-        return -1;
+        return result;
     }
     float closestT = std::numeric_limits<float>::max();
-    int pickedIndex = -1;
 
     if (scene->sceneBvhNodes.empty() || scene->scenePrimitives.empty())
     {
-        return -1;
+        return result;
     }
 
-    constexpr int kMaxBvhStackSize = 256;
+    constexpr int kMaxBvhStackSize = RENDER_CONFIG_MAX_PICKING_BVH_STACK_SIZE;
     int stack[kMaxBvhStackSize];
     int stackSize = 0;
     stack[stackSize++] = 0;
@@ -851,16 +1046,19 @@ int pickSceneObject(double xpos, double ypos)
                     hit = intersectGeomForPicking(geom, ray, closestT, candidateT);
                     if (hit)
                     {
-                        pickedIndex = geom.objectIndex;
+                        result.objectIndex = geom.objectIndex;
+                        result.materialId = geom.materialid;
                     }
                 }
                 else if (primitive.type == SCENE_PRIMITIVE_MESH_INSTANCE)
                 {
                     const MeshInstance& meshInstance = scene->meshInstances[primitive.index];
-                    hit = traverseTriangleBvhForPicking(*scene, meshInstance, ray, closestT, candidateT);
+                    int candidateMaterialId = -1;
+                    hit = traverseTriangleBvhForPicking(*scene, meshInstance, ray, closestT, candidateT, candidateMaterialId);
                     if (hit)
                     {
-                        pickedIndex = meshInstance.objectIndex;
+                        result.objectIndex = meshInstance.objectIndex;
+                        result.materialId = candidateMaterialId;
                     }
                 }
 
@@ -914,7 +1112,7 @@ int pickSceneObject(double xpos, double ypos)
         }
     }
 
-    return pickedIndex;
+    return result;
 }
 
 void applyObjectTransform(int objectIndex, const glm::vec3& translation, const glm::vec3& rotation, const glm::vec3& scale)
@@ -933,17 +1131,19 @@ void applyObjectTransform(int objectIndex, const glm::vec3& translation, const g
     renderState = &scene->state;
 }
 
-void applyObjectMaterialProperties(int objectIndex, float roughness, float metallic)
+void applyMaterialProperties(int materialId, const Material& material)
 {
     if (scene == nullptr)
     {
         return;
     }
 
-    scene->updateObjectMaterialProperties(
-        static_cast<size_t>(objectIndex),
-        glm::clamp(roughness, 0.0f, 1.0f),
-        glm::clamp(metallic, 0.0f, 1.0f));
+    if (materialId < 0 || materialId >= static_cast<int>(scene->materials.size()))
+    {
+        return;
+    }
+
+    scene->updateMaterial(static_cast<size_t>(materialId), material);
     iteration = 0;
     renderState = &scene->state;
 }
@@ -1437,6 +1637,8 @@ int main(int argc, char** argv)
 
 void saveImage()
 {
+    pathtraceDownloadImage();
+
     const float samples = static_cast<float>(glm::max(iteration, 1));
     // output image file
     Image img(width, height);
@@ -1565,10 +1767,13 @@ void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods)
                 return;
             }
 
-            selectedObjectIndex = pickSceneObject(lastX, lastY);
+            const PickResult pick = pickSceneObject(lastX, lastY);
+            selectedObjectIndex = pick.objectIndex;
+            selectedMaterialId = pick.materialId;
             if (selectedObjectIndex >= 0)
             {
                 const SceneObject& object = scene->objects[selectedObjectIndex];
+                syncSelectedMaterialToObject();
                 objectManipulationActive = true;
                 manipulationStartX = lastX;
                 manipulationStartY = lastY;
@@ -1578,6 +1783,7 @@ void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods)
             }
             else
             {
+                selectedMaterialId = -1;
                 objectManipulationActive = false;
             }
         }
@@ -1646,10 +1852,3 @@ void mousePositionCallback(GLFWwindow* window, double xpos, double ypos)
     lastX = xpos;
     lastY = ypos;
 }
-
-
-
-
-
-
-
