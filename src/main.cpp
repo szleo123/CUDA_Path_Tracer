@@ -568,6 +568,34 @@ void renderAnalyticsSection()
     }
 
     ImGui::Separator();
+    ImGui::TextUnformatted("Firefly Mitigation");
+    if (ImGui::Checkbox("Enable Firefly Mitigation", &imguiData->EnableFireflyMitigation))
+    {
+        iteration = 0;
+    }
+    if (imguiData->EnableFireflyMitigation)
+    {
+        if (ImGui::SliderFloat(
+                "Max Sample Luminance",
+                &imguiData->MaxNonDeltaSampleLuminance,
+                1.0f,
+                50.0f,
+                "%.2f"))
+        {
+            iteration = 0;
+        }
+        if (ImGui::SliderFloat(
+                "Max Throughput Luminance",
+                &imguiData->MaxPathThroughputLuminance,
+                1.0f,
+                50.0f,
+                "%.2f"))
+        {
+            iteration = 0;
+        }
+    }
+
+    ImGui::Separator();
     ImGui::TextUnformatted("Environment");
     EnvironmentSettings environment = scene->state.environment;
     int environmentMode = environment.mode;
@@ -625,26 +653,11 @@ void renderAnalyticsSection()
         iteration = 0;
     }
 
-    if (imguiData->UseMaterialSort)
-    {
-        if (ImGui::SliderInt("Sort Every N Iter", &imguiData->SortEveryNIterations, 1, 32))
-        {
-            iteration = 0;
-        }
-        if (ImGui::SliderInt("Sort Max Bounce", &imguiData->SortMaxBounce, 1, 16))
-        {
-            iteration = 0;
-        }
-        if (ImGui::SliderInt("Sort Min Paths", &imguiData->SortMinPathCount, 1024, 262144))
-        {
-            iteration = 0;
-        }
-    }
-
     ImGui::Checkbox("Profile CUDA Kernels", &imguiData->EnableKernelTiming);
 
     ImGui::Text("Tone Mapping %s", getToneMapModeLabel(imguiData->ToneMapModeValue));
     ImGui::Text("Exposure %.2f EV", imguiData->ExposureValue);
+    ImGui::Text("Firefly Mitigation %s", imguiData->EnableFireflyMitigation ? "On" : "Off");
     ImGui::Text("Render Debug %s", getRenderDebugModeLabel(imguiData->RenderDebugModeValue));
     ImGui::Text("Traced Depth %d", imguiData->TracedDepth);
     ImGui::Text("Last Sort Time %.3f ms", imguiData->LastSortTimeMs);

@@ -527,6 +527,7 @@ int registerImportedMaterial(
     material.clearcoatFactor = importedMaterial.clearcoatFactor;
     material.clearcoatRoughness = importedMaterial.clearcoatRoughnessFactor;
     material.occlusionStrength = importedMaterial.occlusionStrength;
+    material.ambientOcclusion = 1.0f;
     material.hasReflective = fmaxf(material.hasReflective, importedMaterial.metallicFactor);
     material.hasRefractive = fmaxf(material.hasRefractive, importedMaterial.transmissionFactor);
     if (glm::length(importedMaterial.emissiveFactor) > 0.0f
@@ -623,6 +624,7 @@ Material parseMaterialDefinition(
     material.emissiveTexcoordSet = 0;
     material.occlusionTexcoordSet = 0;
     material.occlusionStrength = 1.0f;
+    material.ambientOcclusion = 1.0f;
 
     glm::vec3 baseColor(1.0f);
     if (materialJson.contains("RGB"))

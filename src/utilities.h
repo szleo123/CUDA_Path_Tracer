@@ -87,12 +87,12 @@ public:
         : TracedDepth(0)
         , UseMaterialSort(false)
         , EnableKernelTiming(false)
-        , SortEveryNIterations(RENDER_CONFIG_DEFAULT_SORT_EVERY_N_ITERATIONS)
-        , SortMaxBounce(RENDER_CONFIG_DEFAULT_SORT_MAX_BOUNCE)
-        , SortMinPathCount(RENDER_CONFIG_DEFAULT_SORT_MIN_PATH_COUNT)
         , LastSortTimeMs(0.0f)
         , LastShadeTimeMs(0.0f)
         , LastNumShadedPaths(0)
+        , EnableFireflyMitigation(false)
+        , MaxNonDeltaSampleLuminance(RENDER_CONFIG_MAX_NON_DELTA_SAMPLE_LUMINANCE)
+        , MaxPathThroughputLuminance(RENDER_CONFIG_MAX_PATH_THROUGHPUT_LUMINANCE)
         , ExposureValue(0.0f)
         , ToneMapModeValue(TONEMAP_REINHARD)
         , RenderDebugModeValue(RENDER_DEBUG_NONE)
@@ -100,12 +100,12 @@ public:
     int TracedDepth;
     bool UseMaterialSort;
     bool EnableKernelTiming;
-    int SortEveryNIterations;
-    int SortMaxBounce;
-    int SortMinPathCount;
     float LastSortTimeMs;
     float LastShadeTimeMs;
     int LastNumShadedPaths;
+    bool EnableFireflyMitigation;
+    float MaxNonDeltaSampleLuminance;
+    float MaxPathThroughputLuminance;
     float ExposureValue;
     int ToneMapModeValue;
     int RenderDebugModeValue;

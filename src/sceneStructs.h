@@ -131,6 +131,7 @@ struct Material
     float clearcoatFactor;
     float clearcoatRoughness;
     float occlusionStrength;
+    float ambientOcclusion;
     int alphaMode;
     int doubleSided;
     int thinWalled;

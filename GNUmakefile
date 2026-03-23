@@ -18,7 +18,7 @@ MinSizeRel: build
 Release: build
 	(cd build && ${CMAKE} -DCMAKE_BUILD_TYPE=$@ .. && make)
 
-RelWithDebugInfo: build
+RelWithDebInfo: build
 	(cd build && ${CMAKE} -DCMAKE_BUILD_TYPE=$@ .. && make)
 
 
@@ -31,4 +31,4 @@ build:
 clean:
 	((cd build && make clean) 2>&- || true)
 
-.PHONY: all Debug MinSizeRel Release RelWithDebugInfo clean
+.PHONY: all Debug MinSizeRel Release RelWithDebInfo clean

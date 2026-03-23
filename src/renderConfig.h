@@ -47,18 +47,15 @@
 // Upper bound on Russian roulette survival probability.
 #define RENDER_CONFIG_MAX_RUSSIAN_ROULETTE_SURVIVAL 0.95f
 
+// Clamp on non-delta BSDF sample luminance to suppress glossy/transmissive fireflies.
+#define RENDER_CONFIG_MAX_NON_DELTA_SAMPLE_LUMINANCE 12.0f
+
+// Clamp on path throughput luminance after each bounce to reduce long-path caustic fireflies.
+#define RENDER_CONFIG_MAX_PATH_THROUGHPUT_LUMINANCE 10.0f
+
 // 1D CUDA block size used by tracing, sorting, and shading kernels.
 #define RENDER_CONFIG_PATH_TRACE_BLOCK_SIZE_1D 256
 
 // 2D CUDA block size used for camera ray generation and final image upload.
 #define RENDER_CONFIG_CAMERA_BLOCK_SIZE_X 8
 #define RENDER_CONFIG_CAMERA_BLOCK_SIZE_Y 8
-
-// Default material-sort cadence when sorting is enabled from the UI.
-#define RENDER_CONFIG_DEFAULT_SORT_EVERY_N_ITERATIONS 4
-
-// Default maximum bounce that participates in material sorting.
-#define RENDER_CONFIG_DEFAULT_SORT_MAX_BOUNCE 2
-
-// Default minimum number of active paths before material sorting is worth the overhead.
-#define RENDER_CONFIG_DEFAULT_SORT_MIN_PATH_COUNT 32768

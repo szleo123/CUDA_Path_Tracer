@@ -12,6 +12,7 @@
 #include <thrust/iterator/zip_iterator.h>
 #include <thrust/random.h>
 #include <thrust/remove.h>
+#include <thrust/sequence.h>
 #include <thrust/sort.h>
 #include <thrust/tuple.h>
 
@@ -125,8 +126,11 @@ static SceneBvhNode* dev_sceneBvhNodes = NULL;
 static TextureData* dev_textures = NULL;
 static glm::vec4* dev_texturePixels = NULL;
 static PathSegment* dev_paths = NULL;
+static PathSegment* dev_pathsScratch = NULL;
 static ShadeableIntersection* dev_intersections = NULL;
+static ShadeableIntersection* dev_intersectionsScratch = NULL;
 static int* dev_materialSortKeys = NULL;
+static int* dev_pathSortIndices = NULL;
 static int* dev_lightGeomIndices = NULL;
 static float* dev_geomLightSelectionPmf = NULL;
 static float* dev_environmentTexelPmf = NULL;
@@ -146,6 +150,8 @@ static int dev_environmentWidth = 0;
 static int dev_environmentHeight = 0;
 
 __host__ __device__ inline float geomEmissiveArea(const Geom& geom, const Material& material);
+__host__ __device__ inline float luminance(const glm::vec3& color);
+__host__ __device__ inline glm::vec3 evaluateAnalyticLightEmission(const Material& material);
 
 template <typename T>
 void uploadVectorToDevice(T*& devicePtr, size_t& deviceCount, const std::vector<T>& hostData)
@@ -184,9 +190,8 @@ float computeEmissiveGeomWeight(const Geom& geom, const Material& material)
         return 0.0f;
     }
 
-    const glm::vec3 emittedPower = material.color * material.emittance;
-    const float luminance = 0.2126f * emittedPower.r + 0.7152f * emittedPower.g + 0.0722f * emittedPower.b;
-    return fmaxf(geomEmissiveArea(geom, material) * luminance, 0.0f);
+    const glm::vec3 emittedPower = evaluateAnalyticLightEmission(material);
+    return fmaxf(geomEmissiveArea(geom, material) * luminance(emittedPower), 0.0f);
 }
 
 void uploadEnvironmentSamplingData(const Scene* scene)
@@ -430,6 +435,7 @@ void pathtraceInit(Scene* scene)
     cudaMemset(dev_image, 0, pixelcount * sizeof(glm::vec3));
 
     cudaMalloc(&dev_paths, pixelcount * sizeof(PathSegment));
+    cudaMalloc(&dev_pathsScratch, pixelcount * sizeof(PathSegment));
 
     uploadVectorToDevice(dev_geoms, dev_geomsCount, scene->geoms);
     uploadVectorToDevice(dev_materials, dev_materialsCount, scene->materials);
@@ -442,7 +448,9 @@ void pathtraceInit(Scene* scene)
     uploadVectorToDevice(dev_texturePixels, dev_texturePixelCount, scene->texturePixels);
 
     cudaMalloc(&dev_intersections, pixelcount * sizeof(ShadeableIntersection));
+    cudaMalloc(&dev_intersectionsScratch, pixelcount * sizeof(ShadeableIntersection));
     cudaMalloc(&dev_materialSortKeys, pixelcount * sizeof(int));
+    cudaMalloc(&dev_pathSortIndices, pixelcount * sizeof(int));
     uploadLightGeomData(scene);
     uploadEnvironmentSamplingData(scene);
     scene->gpuDynamicDataDirty = false;
@@ -502,6 +510,7 @@ void pathtraceFree()
 {
     cudaFree(dev_image);  // no-op if dev_image is null
     cudaFree(dev_paths);
+    cudaFree(dev_pathsScratch);
     cudaFree(dev_geoms);
     cudaFree(dev_materials);
     cudaFree(dev_triangles);
@@ -512,7 +521,9 @@ void pathtraceFree()
     cudaFree(dev_textures);
     cudaFree(dev_texturePixels);
     cudaFree(dev_intersections);
+    cudaFree(dev_intersectionsScratch);
     cudaFree(dev_materialSortKeys);
+    cudaFree(dev_pathSortIndices);
     cudaFree(dev_lightGeomIndices);
     cudaFree(dev_geomLightSelectionPmf);
     cudaFree(dev_environmentTexelPmf);
@@ -520,6 +531,7 @@ void pathtraceFree()
     cudaFree(dev_environmentAliasIndex);
     dev_image = nullptr;
     dev_paths = nullptr;
+    dev_pathsScratch = nullptr;
     dev_geoms = nullptr;
     dev_materials = nullptr;
     dev_triangles = nullptr;
@@ -530,7 +542,9 @@ void pathtraceFree()
     dev_textures = nullptr;
     dev_texturePixels = nullptr;
     dev_intersections = nullptr;
+    dev_intersectionsScratch = nullptr;
     dev_materialSortKeys = nullptr;
+    dev_pathSortIndices = nullptr;
     dev_lightGeomIndices = nullptr;
     dev_geomLightSelectionPmf = nullptr;
     dev_environmentTexelPmf = nullptr;
@@ -972,6 +986,22 @@ __device__ bool traceSceneClosest(
     return outHit.materialId >= 0;
 }
 
+__device__ inline void clearIntersection(ShadeableIntersection& intersection)
+{
+    intersection.t = -1.0f;
+    intersection.materialId = -1;
+    intersection.tangentSetMask = 0;
+    intersection.uvSetMask = 0;
+    for (int uvSet = 0; uvSet < MAX_TEXTURE_UV_SETS; ++uvSet)
+    {
+        intersection.tangents[uvSet] = glm::vec3(0.0f);
+        intersection.tangentSigns[uvSet] = 1.0f;
+        intersection.uv[uvSet] = glm::vec2(0.0f);
+    }
+    intersection.geomId = -1;
+    intersection.triangleIndex = -1;
+}
+
 __global__ void computeIntersections(
     int num_paths,
     PathSegment* pathSegments,
@@ -992,18 +1022,7 @@ __global__ void computeIntersections(
         PathSegment pathSegment = pathSegments[path_index];
         if (pathSegment.remainingBounces <= 0)
         {
-            intersections[path_index].t = -1.0f;
-            intersections[path_index].materialId = -1;
-            intersections[path_index].tangentSetMask = 0;
-            intersections[path_index].uvSetMask = 0;
-            for (int uvSet = 0; uvSet < MAX_TEXTURE_UV_SETS; ++uvSet)
-            {
-                intersections[path_index].tangents[uvSet] = glm::vec3(0.0f);
-                intersections[path_index].tangentSigns[uvSet] = 1.0f;
-                intersections[path_index].uv[uvSet] = glm::vec2(0.0f);
-            }
-            intersections[path_index].geomId = -1;
-            intersections[path_index].triangleIndex = -1;
+            clearIntersection(intersections[path_index]);
             return;
         }
 
@@ -1023,18 +1042,7 @@ __global__ void computeIntersections(
             triangleBvhNodeCount,
             hit))
         {
-            intersections[path_index].t = -1.0f;
-            intersections[path_index].materialId = -1;
-            intersections[path_index].tangentSetMask = 0;
-            intersections[path_index].uvSetMask = 0;
-            for (int uvSet = 0; uvSet < MAX_TEXTURE_UV_SETS; ++uvSet)
-            {
-                intersections[path_index].tangents[uvSet] = glm::vec3(0.0f);
-                intersections[path_index].tangentSigns[uvSet] = 1.0f;
-                intersections[path_index].uv[uvSet] = glm::vec2(0.0f);
-            }
-            intersections[path_index].geomId = -1;
-            intersections[path_index].triangleIndex = -1;
+            clearIntersection(intersections[path_index]);
         }
         else
         {
@@ -1068,6 +1076,23 @@ __global__ void computeMaterialSortKeys(
     }
 }
 
+__global__ void reorderSortedPathState(
+    int num_paths,
+    const int* sortedIndices,
+    const PathSegment* srcPaths,
+    const ShadeableIntersection* srcIntersections,
+    PathSegment* dstPaths,
+    ShadeableIntersection* dstIntersections)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < num_paths)
+    {
+        const int srcIdx = sortedIndices[idx];
+        dstPaths[idx] = srcPaths[srcIdx];
+        dstIntersections[idx] = srcIntersections[srcIdx];
+    }
+}
+
 __host__ __device__ inline float powerHeuristic(float pdfA, float pdfB)
 {
     float a2 = pdfA * pdfA;
@@ -1078,6 +1103,22 @@ __host__ __device__ inline float powerHeuristic(float pdfA, float pdfB)
 __host__ __device__ inline float maxComponent(const glm::vec3& v)
 {
     return fmaxf(v.x, fmaxf(v.y, v.z));
+}
+
+__host__ __device__ inline glm::vec3 clampLuminance(const glm::vec3& value, float maxLuminance)
+{
+    if (maxLuminance <= 0.0f)
+    {
+        return value;
+    }
+
+    const float lum = luminance(value);
+    if (lum <= maxLuminance || lum <= EPSILON)
+    {
+        return value;
+    }
+
+    return value * (maxLuminance / lum);
 }
 
 __device__ inline glm::vec3 offsetRayOrigin(
@@ -1431,8 +1472,7 @@ __device__ inline Material evaluateShadingMaterial(
     const glm::vec2 metallicRoughness = evaluateMetallicRoughness(material, intersection, textures, texturePixels);
     shadingMaterial.metallic = metallicRoughness.x;
     shadingMaterial.roughness = metallicRoughness.y;
-    const float occlusion = evaluateMaterialOcclusion(material, intersection, textures, texturePixels);
-    shadingMaterial.color *= occlusion;
+    shadingMaterial.ambientOcclusion = evaluateMaterialOcclusion(material, intersection, textures, texturePixels);
     shadingMaterial.specularColor = glm::mix(material.specularColor, shadingMaterial.color, shadingMaterial.metallic);
     shadingMaterial.hasReflective = fmaxf(shadingMaterial.hasReflective, shadingMaterial.metallic);
     shadingMaterial.hasRefractive = fmaxf(shadingMaterial.hasRefractive, shadingMaterial.transmissionFactor);
@@ -1670,6 +1710,19 @@ __device__ inline glm::vec3 evaluateMeshDebugColor(
     default:
         return shadingMaterial.color;
     }
+}
+
+__host__ __device__ inline float luminance(const glm::vec3& color)
+{
+    return 0.2126f * color.r + 0.7152f * color.g + 0.0722f * color.b;
+}
+
+__host__ __device__ inline glm::vec3 evaluateAnalyticLightEmission(const Material& material)
+{
+    const glm::vec3 emissionColor = glm::length2(material.emissiveColor) > 0.0f
+        ? material.emissiveColor
+        : material.color;
+    return emissionColor * material.emittance;
 }
 
 __host__ __device__ inline float geomEmissiveArea(const Geom& geom, const Material& material)
@@ -1926,6 +1979,327 @@ __device__ bool applyRussianRoulette(
     return true;
 }
 
+__device__ inline glm::vec3 spawnSurfaceRayOrigin(
+    const glm::vec3& point,
+    const glm::vec3& geometricNormal,
+    const glm::vec3& direction,
+    const Material& shadingMaterial,
+    int alphaMode)
+{
+    return (shadingMaterial.doubleSided && alphaMode == 1)
+        ? offsetRayOriginAlongDirection(
+            point,
+            direction,
+            RENDER_CONFIG_THIN_SURFACE_DIRECTION_OFFSET_SCALE)
+        : offsetRayOrigin(point, geometricNormal, direction);
+}
+
+__device__ inline bool handleTransparentSurfacePassThrough(
+    const Material& material,
+    const ShadeableIntersection& intersection,
+    const glm::vec4* baseColorSamplePtr,
+    const TextureData* textures,
+    const glm::vec4* texturePixels,
+    thrust::default_random_engine& rng,
+    PathSegment& pathSegment)
+{
+    if (material.alphaMode == 1)
+    {
+        const float alpha = evaluateMaterialAlpha(material, intersection, textures, texturePixels, baseColorSamplePtr);
+        if (alpha < material.alphaCutoff)
+        {
+            const glm::vec3 hitPoint = pathSegment.ray.origin + intersection.t * pathSegment.ray.direction;
+            pathSegment.ray.origin = offsetRayOriginAlongDirection(
+                hitPoint,
+                pathSegment.ray.direction,
+                RENDER_CONFIG_THIN_SURFACE_DIRECTION_OFFSET_SCALE);
+            pathSegment.lastBounceWasDelta = 1;
+            pathSegment.lastBsdfPdf = 1.0f;
+            pathSegment.ignoreTriangleIndex = intersection.triangleIndex;
+            return true;
+        }
+        return false;
+    }
+
+    if (material.alphaMode == 2)
+    {
+        const float alpha = glm::clamp(
+            evaluateMaterialAlpha(material, intersection, textures, texturePixels, baseColorSamplePtr),
+            0.0f,
+            1.0f);
+        thrust::uniform_real_distribution<float> u01(0, 1);
+        if (alpha <= EPSILON || u01(rng) > alpha)
+        {
+            const glm::vec3 hitPoint = pathSegment.ray.origin + intersection.t * pathSegment.ray.direction;
+            pathSegment.ray.origin = offsetRayOriginAlongDirection(
+                hitPoint,
+                pathSegment.ray.direction,
+                RENDER_CONFIG_THIN_SURFACE_DIRECTION_OFFSET_SCALE);
+            pathSegment.lastBounceWasDelta = 1;
+            pathSegment.lastBsdfPdf = 1.0f;
+            pathSegment.ignoreTriangleIndex = intersection.triangleIndex;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+__device__ inline void orientSurfaceForShading(
+    const Material& shadingMaterial,
+    const glm::vec3& wo,
+    const glm::vec3& rayDirection,
+    glm::vec3& shadingNormal,
+    glm::vec3& geometricNormal)
+{
+    if (shadingMaterial.doubleSided)
+    {
+        if (glm::dot(shadingNormal, wo) < 0.0f)
+        {
+            shadingNormal = -shadingNormal;
+        }
+        if (glm::dot(geometricNormal, wo) < 0.0f)
+        {
+            geometricNormal = -geometricNormal;
+        }
+        return;
+    }
+
+    if (glm::dot(shadingNormal, rayDirection) > 0.0f)
+    {
+        shadingNormal = -shadingNormal;
+    }
+}
+
+__device__ inline void sampleDirectAnalyticLights(
+    thrust::default_random_engine& rng,
+    const PathSegment& pathSegment,
+    const ShadeableIntersection& intersection,
+    const Material& material,
+    const Material& shadingMaterial,
+    const glm::vec3& intersect,
+    const glm::vec3& geometricNormal,
+    const glm::vec3& shadingNormal,
+    const glm::vec3& wo,
+    const Geom* geoms,
+    const MeshInstance* meshInstances,
+    const ScenePrimitive* scenePrimitives,
+    const SceneBvhNode* sceneBvhNodes,
+    int sceneBvhNodeCount,
+    const Material* materials,
+    const Triangle* triangles,
+    const TriangleBvhNode* triangleBvhNodes,
+    int triangleBvhNodeCount,
+    const TextureData* textures,
+    const glm::vec4* texturePixels,
+    const int* lightGeomIndices,
+    const float* geomLightSelectionPmf,
+    int lightGeomCount,
+    glm::vec3* image)
+{
+    if (lightGeomCount <= 0)
+    {
+        return;
+    }
+
+    float lightSelectionPmf = 0.0f;
+    const int lightGeomIdx = sampleLightIndex(
+        rng,
+        lightGeomIndices,
+        geomLightSelectionPmf,
+        lightGeomCount,
+        lightSelectionPmf);
+    if (lightGeomIdx < 0 || lightSelectionPmf <= 0.0f)
+    {
+        return;
+    }
+
+    const Geom& lightGeom = geoms[lightGeomIdx];
+    const Material& lightMaterial = materials[lightGeom.materialid];
+    if (lightMaterial.emittance <= 0.0f)
+    {
+        return;
+    }
+
+    glm::vec3 lightPoint;
+    glm::vec3 lightNormal;
+    if (lightGeom.type == SPHERE)
+    {
+        samplePointOnSphere(lightGeom, rng, lightPoint, lightNormal);
+    }
+    else
+    {
+        samplePointOnCube(lightGeom, rng, lightPoint, lightNormal);
+    }
+
+    const glm::vec3 toLight = lightPoint - intersect;
+    const float dist2 = glm::dot(toLight, toLight);
+    if (dist2 <= EPSILON)
+    {
+        return;
+    }
+
+    const float dist = sqrtf(dist2);
+    const glm::vec3 wi = toLight / dist;
+    const float cosSurface = glm::max(0.0f, glm::dot(shadingNormal, wi));
+    const float cosLight = glm::max(0.0f, glm::dot(lightNormal, -wi));
+    if (cosSurface <= 0.0f || cosLight <= 0.0f)
+    {
+        return;
+    }
+
+    Ray shadowRay;
+    shadowRay.origin = spawnSurfaceRayOrigin(intersect, geometricNormal, wi, shadingMaterial, material.alphaMode);
+    shadowRay.direction = wi;
+
+    const glm::vec3 shadowTransmittance = computeShadowTransmittance(
+        shadowRay,
+        dist,
+        lightGeomIdx,
+        intersection.triangleIndex,
+        geoms,
+        meshInstances,
+        scenePrimitives,
+        sceneBvhNodes,
+        sceneBvhNodeCount,
+        materials,
+        textures,
+        texturePixels,
+        triangles,
+        triangleBvhNodes,
+        triangleBvhNodeCount);
+    if (glm::length2(shadowTransmittance) <= 0.0f)
+    {
+        return;
+    }
+
+    const float lightPdf = evaluateLightPdf(
+        lightGeom,
+        lightMaterial,
+        lightSelectionPmf,
+        intersect,
+        wi,
+        lightPoint,
+        lightNormal);
+    const glm::vec3 f = evaluateBsdf(shadingMaterial, wo, shadingNormal, wi);
+    if (lightPdf <= 0.0f || glm::length2(f) <= 0.0f)
+    {
+        return;
+    }
+
+    const float bsdfPdf = evaluateBsdfPdf(shadingMaterial, wo, shadingNormal, wi);
+    const float misWeight = powerHeuristic(lightPdf, bsdfPdf);
+    const glm::vec3 Le = evaluateAnalyticLightEmission(lightMaterial);
+    const glm::vec3 directLi = pathSegment.color * shadowTransmittance * f * Le
+        * (cosSurface * misWeight / fmaxf(lightPdf, EPSILON));
+    image[pathSegment.pixelIndex] += directLi;
+}
+
+__device__ inline void sampleDirectEnvironmentLightContribution(
+    thrust::default_random_engine& rng,
+    const PathSegment& pathSegment,
+    const ShadeableIntersection& intersection,
+    const Material& material,
+    const Material& shadingMaterial,
+    const glm::vec3& intersect,
+    const glm::vec3& geometricNormal,
+    const glm::vec3& shadingNormal,
+    const glm::vec3& wo,
+    const Geom* geoms,
+    const MeshInstance* meshInstances,
+    const ScenePrimitive* scenePrimitives,
+    const SceneBvhNode* sceneBvhNodes,
+    int sceneBvhNodeCount,
+    const Material* materials,
+    const Triangle* triangles,
+    const TriangleBvhNode* triangleBvhNodes,
+    int triangleBvhNodeCount,
+    const TextureData* textures,
+    const glm::vec4* texturePixels,
+    EnvironmentSettings environment,
+    const float* environmentTexelPmf,
+    const float* environmentAliasProb,
+    const int* environmentAliasIndex,
+    int environmentWidth,
+    int environmentHeight,
+    glm::vec3* image)
+{
+    if (!hasEnvironmentImportanceSampling(
+            environment,
+            textures,
+            environmentTexelPmf,
+            environmentAliasProb,
+            environmentAliasIndex,
+            environmentWidth,
+            environmentHeight))
+    {
+        return;
+    }
+
+    glm::vec3 envWi(0.0f);
+    glm::vec3 envRadiance(0.0f);
+    float envPdf = 0.0f;
+    if (!sampleEnvironmentLight(
+            rng,
+            environment,
+            textures,
+            texturePixels,
+            environmentTexelPmf,
+            environmentAliasProb,
+            environmentAliasIndex,
+            environmentWidth,
+            environmentHeight,
+            envWi,
+            envRadiance,
+            envPdf))
+    {
+        return;
+    }
+
+    const float cosSurface = glm::max(0.0f, glm::dot(shadingNormal, envWi));
+    if (cosSurface <= 0.0f)
+    {
+        return;
+    }
+
+    Ray shadowRay;
+    shadowRay.origin = spawnSurfaceRayOrigin(intersect, geometricNormal, envWi, shadingMaterial, material.alphaMode);
+    shadowRay.direction = envWi;
+
+    const glm::vec3 shadowTransmittance = computeShadowTransmittance(
+        shadowRay,
+        FLT_MAX,
+        -1,
+        intersection.triangleIndex,
+        geoms,
+        meshInstances,
+        scenePrimitives,
+        sceneBvhNodes,
+        sceneBvhNodeCount,
+        materials,
+        textures,
+        texturePixels,
+        triangles,
+        triangleBvhNodes,
+        triangleBvhNodeCount);
+    if (glm::length2(shadowTransmittance) <= 0.0f)
+    {
+        return;
+    }
+
+    const glm::vec3 f = evaluateBsdf(shadingMaterial, wo, shadingNormal, envWi);
+    if (glm::length2(f) <= 0.0f)
+    {
+        return;
+    }
+
+    const float bsdfPdf = evaluateBsdfPdf(shadingMaterial, wo, shadingNormal, envWi);
+    const float misWeight = powerHeuristic(envPdf, bsdfPdf);
+    const glm::vec3 directLi = pathSegment.color * shadowTransmittance * f * envRadiance
+        * (cosSurface * misWeight / fmaxf(envPdf, EPSILON));
+    image[pathSegment.pixelIndex] += directLi;
+}
+
 __global__ void shadeMaterialPaths(
     int iter,
     int num_paths,
@@ -1938,7 +2312,6 @@ __global__ void shadeMaterialPaths(
     const ScenePrimitive* scenePrimitives,
     const SceneBvhNode* sceneBvhNodes,
     int sceneBvhNodeCount,
-    int geoms_size,
     const Triangle* triangles,
     const TriangleBvhNode* triangleBvhNodes,
     int triangleBvhNodeCount,
@@ -1953,6 +2326,9 @@ __global__ void shadeMaterialPaths(
     const int* lightGeomIndices,
     const float* geomLightSelectionPmf,
     int lightGeomCount,
+    int enableFireflyMitigation,
+    float maxNonDeltaSampleLuminance,
+    float maxPathThroughputLuminance,
     int renderDebugMode,
     glm::vec3* image)
 {
@@ -1981,39 +2357,16 @@ __global__ void shadeMaterialPaths(
                 pathSegment.pixelIndex,
                 pathSegment.remainingBounces);
 
-            if (material.alphaMode == 1
-                && evaluateMaterialAlpha(material, intersection, textures, texturePixels, baseColorSamplePtr) < material.alphaCutoff)
+            if (handleTransparentSurfacePassThrough(
+                    material,
+                    intersection,
+                    baseColorSamplePtr,
+                    textures,
+                    texturePixels,
+                    rng,
+                    pathSegment))
             {
-                const glm::vec3 hitPoint = pathSegment.ray.origin + intersection.t * pathSegment.ray.direction;
-                pathSegment.ray.origin = offsetRayOriginAlongDirection(
-                    hitPoint,
-                    pathSegment.ray.direction,
-                    RENDER_CONFIG_THIN_SURFACE_DIRECTION_OFFSET_SCALE);
-                pathSegment.lastBounceWasDelta = 1;
-                pathSegment.lastBsdfPdf = 1.0f;
-                pathSegment.ignoreTriangleIndex = intersection.triangleIndex;
                 return;
-            }
-
-            if (material.alphaMode == 2)
-            {
-                const float alpha = glm::clamp(
-                    evaluateMaterialAlpha(material, intersection, textures, texturePixels, baseColorSamplePtr),
-                    0.0f,
-                    1.0f);
-                thrust::uniform_real_distribution<float> u01(0, 1);
-                if (alpha <= EPSILON || u01(rng) > alpha)
-                {
-                    const glm::vec3 hitPoint = pathSegment.ray.origin + intersection.t * pathSegment.ray.direction;
-                    pathSegment.ray.origin = offsetRayOriginAlongDirection(
-                        hitPoint,
-                        pathSegment.ray.direction,
-                        RENDER_CONFIG_THIN_SURFACE_DIRECTION_OFFSET_SCALE);
-                    pathSegment.lastBounceWasDelta = 1;
-                    pathSegment.lastBsdfPdf = 1.0f;
-                    pathSegment.ignoreTriangleIndex = intersection.triangleIndex;
-                    return;
-                }
             }
 
             Material shadingMaterial = evaluateShadingMaterial(material, intersection, textures, texturePixels, baseColorSamplePtr);
@@ -2064,183 +2417,80 @@ __global__ void shadeMaterialPaths(
                 pathSegment.remainingBounces = 0;
             }
             else {
-                glm::vec3 intersect = pathSegment.ray.origin + intersection.t * pathSegment.ray.direction;
+                const glm::vec3 intersect = pathSegment.ray.origin + intersection.t * pathSegment.ray.direction;
                 glm::vec3 geometricNormal = intersection.geometricNormal;
                 glm::vec3 shadingNormal = intersection.surfaceNormal;
                 const glm::vec3 wo = -glm::normalize(pathSegment.ray.direction);
-                if (shadingMaterial.doubleSided)
-                {
-                    if (glm::dot(shadingNormal, wo) < 0.0f)
-                    {
-                        shadingNormal = -shadingNormal;
-                    }
-                    if (glm::dot(geometricNormal, wo) < 0.0f)
-                    {
-                        geometricNormal = -geometricNormal;
-                    }
-                }
-                else if (glm::dot(shadingNormal, pathSegment.ray.direction) > 0.0f) {
-                    shadingNormal = -shadingNormal;
-                }
+                orientSurfaceForShading(shadingMaterial, wo, pathSegment.ray.direction, shadingNormal, geometricNormal);
 
                 const bool useDirectLightSampling = materialHasNonDeltaBsdf(shadingMaterial);
                 if (useDirectLightSampling) {
-                    if (lightGeomCount > 0) {
-                        float lightSelectionPmf = 0.0f;
-                        int lightGeomIdx = sampleLightIndex(
-                            rng,
-                            lightGeomIndices,
-                            geomLightSelectionPmf,
-                            lightGeomCount,
-                            lightSelectionPmf);
-                        if (lightGeomIdx >= 0 && lightSelectionPmf > 0.0f) {
-                        const Geom& lightGeom = geoms[lightGeomIdx];
-                        const Material& lightMaterial = materials[lightGeom.materialid];
+                    sampleDirectAnalyticLights(
+                        rng,
+                        pathSegment,
+                        intersection,
+                        material,
+                        shadingMaterial,
+                        intersect,
+                        geometricNormal,
+                        shadingNormal,
+                        wo,
+                        geoms,
+                        meshInstances,
+                        scenePrimitives,
+                        sceneBvhNodes,
+                        sceneBvhNodeCount,
+                        materials,
+                        triangles,
+                        triangleBvhNodes,
+                        triangleBvhNodeCount,
+                        textures,
+                        texturePixels,
+                        lightGeomIndices,
+                        geomLightSelectionPmf,
+                        lightGeomCount,
+                        image);
 
-                        if (lightMaterial.emittance > 0.0f) {
-                            glm::vec3 lightPoint;
-                            glm::vec3 lightNormal;
-
-                            if (lightGeom.type == SPHERE) {
-                                samplePointOnSphere(lightGeom, rng, lightPoint, lightNormal);
-                            }
-                            else {
-                                samplePointOnCube(lightGeom, rng, lightPoint, lightNormal);
-                            }
-
-                            glm::vec3 toLight = lightPoint - intersect;
-                            float dist2 = glm::dot(toLight, toLight);
-                            if (dist2 > EPSILON) {
-                                float dist = sqrtf(dist2);
-                                glm::vec3 wi = toLight / dist;
-                                float cosSurface = glm::max(0.0f, glm::dot(shadingNormal, wi));
-                                float cosLight = glm::max(0.0f, glm::dot(lightNormal, -wi));
-
-                                if (cosSurface > 0.0f && cosLight > 0.0f) {
-                                    Ray shadowRay;
-                                    shadowRay.origin = (shadingMaterial.doubleSided && material.alphaMode == 1)
-                                        ? offsetRayOriginAlongDirection(
-                                            intersect,
-                                            wi,
-                                            RENDER_CONFIG_THIN_SURFACE_DIRECTION_OFFSET_SCALE)
-                                        : offsetRayOrigin(intersect, geometricNormal, wi);
-                                    shadowRay.direction = wi;
-
-                                    glm::vec3 shadowTransmittance = computeShadowTransmittance(
-                                        shadowRay,
-                                        dist,
-                                        lightGeomIdx,
-                                        intersection.triangleIndex,
-                                        geoms,
-                                        meshInstances,
-                                        scenePrimitives,
-                                        sceneBvhNodes,
-                                        sceneBvhNodeCount,
-                                        materials,
-                                        textures,
-                                        texturePixels,
-                                        triangles,
-                                        triangleBvhNodes,
-                                        triangleBvhNodeCount);
-                                    if (glm::length2(shadowTransmittance) > 0.0f) {
-                                        float lightPdf = evaluateLightPdf(
-                                            lightGeom,
-                                            lightMaterial,
-                                            lightSelectionPmf,
-                                            intersect,
-                                            wi,
-                                            lightPoint,
-                                            lightNormal);
-                                        glm::vec3 f = evaluateBsdf(shadingMaterial, wo, shadingNormal, wi);
-                                        if (glm::length2(f) > 0.0f)
-                                        {
-                                            float bsdfPdf = evaluateBsdfPdf(shadingMaterial, wo, shadingNormal, wi);
-                                            float misWeight = powerHeuristic(lightPdf, bsdfPdf);
-                                            glm::vec3 Le = lightMaterial.color * lightMaterial.emittance;
-                                            glm::vec3 directLi = pathSegment.color * shadowTransmittance * f * Le
-                                                * (cosSurface * misWeight / fmaxf(lightPdf, EPSILON));
-                                            image[pathSegment.pixelIndex] += directLi;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        }
-                    }
-
-                    if (hasEnvironmentImportanceSampling(
-                            environment,
-                            textures,
-                            environmentTexelPmf,
-                            environmentAliasProb,
-                            environmentAliasIndex,
-                            environmentWidth,
-                            environmentHeight))
-                    {
-                        glm::vec3 envWi(0.0f);
-                        glm::vec3 envRadiance(0.0f);
-                        float envPdf = 0.0f;
-                        if (sampleEnvironmentLight(
-                                rng,
-                                environment,
-                                textures,
-                                texturePixels,
-                                environmentTexelPmf,
-                                environmentAliasProb,
-                                environmentAliasIndex,
-                                environmentWidth,
-                                environmentHeight,
-                                envWi,
-                                envRadiance,
-                                envPdf))
-                        {
-                            const float cosSurface = glm::max(0.0f, glm::dot(shadingNormal, envWi));
-                            if (cosSurface > 0.0f)
-                            {
-                                Ray shadowRay;
-                                shadowRay.origin = (shadingMaterial.doubleSided && material.alphaMode == 1)
-                                    ? offsetRayOriginAlongDirection(
-                                        intersect,
-                                        envWi,
-                                        RENDER_CONFIG_THIN_SURFACE_DIRECTION_OFFSET_SCALE)
-                                    : offsetRayOrigin(intersect, geometricNormal, envWi);
-                                shadowRay.direction = envWi;
-
-                                glm::vec3 shadowTransmittance = computeShadowTransmittance(
-                                    shadowRay,
-                                    FLT_MAX,
-                                    -1,
-                                    intersection.triangleIndex,
-                                    geoms,
-                                    meshInstances,
-                                    scenePrimitives,
-                                    sceneBvhNodes,
-                                    sceneBvhNodeCount,
-                                    materials,
-                                    textures,
-                                    texturePixels,
-                                    triangles,
-                                    triangleBvhNodes,
-                                    triangleBvhNodeCount);
-                                if (glm::length2(shadowTransmittance) > 0.0f)
-                                {
-                                    const glm::vec3 f = evaluateBsdf(shadingMaterial, wo, shadingNormal, envWi);
-                                    if (glm::length2(f) > 0.0f)
-                                    {
-                                        const float bsdfPdf = evaluateBsdfPdf(shadingMaterial, wo, shadingNormal, envWi);
-                                        const float misWeight = powerHeuristic(envPdf, bsdfPdf);
-                                        const glm::vec3 directLi = pathSegment.color * shadowTransmittance * f * envRadiance
-                                            * (cosSurface * misWeight / fmaxf(envPdf, EPSILON));
-                                        image[pathSegment.pixelIndex] += directLi;
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    sampleDirectEnvironmentLightContribution(
+                        rng,
+                        pathSegment,
+                        intersection,
+                        material,
+                        shadingMaterial,
+                        intersect,
+                        geometricNormal,
+                        shadingNormal,
+                        wo,
+                        geoms,
+                        meshInstances,
+                        scenePrimitives,
+                        sceneBvhNodes,
+                        sceneBvhNodeCount,
+                        materials,
+                        triangles,
+                        triangleBvhNodes,
+                        triangleBvhNodeCount,
+                        textures,
+                        texturePixels,
+                        environment,
+                        environmentTexelPmf,
+                        environmentAliasProb,
+                        environmentAliasIndex,
+                        environmentWidth,
+                        environmentHeight,
+                        image);
                 }
 
                 BSDFSample sample;
-                scatterRay(pathSegment.ray, shadingNormal, shadingMaterial, rng, sample);
+                scatterRay(
+                    pathSegment.ray,
+                    shadingNormal,
+                    geometricNormal,
+                    shadingMaterial,
+                    rng,
+                    enableFireflyMitigation,
+                    maxNonDeltaSampleLuminance,
+                    sample);
                 if (!sample.isDelta && sample.pdf <= 0.0f) {
                     pathSegment.color = glm::vec3(0.0f);
                     pathSegment.remainingBounces = 0;
@@ -2248,16 +2498,20 @@ __global__ void shadeMaterialPaths(
                 }
 
                 pathSegment.color *= sample.pathWeight;
+                if (enableFireflyMitigation)
+                {
+                    pathSegment.color = clampLuminance(
+                        pathSegment.color,
+                        maxPathThroughputLuminance);
+                }
                 pathSegment.lastBounceWasDelta = sample.isDelta;
                 pathSegment.lastBsdfPdf = sample.isDelta ? 0.0f : sample.pdf;
-
-
-                pathSegment.ray.origin = (shadingMaterial.doubleSided && material.alphaMode == 1)
-                    ? offsetRayOriginAlongDirection(
-                        intersect,
-                        sample.direction,
-                        RENDER_CONFIG_THIN_SURFACE_DIRECTION_OFFSET_SCALE)
-                    : offsetRayOrigin(intersect, geometricNormal, sample.direction);
+                pathSegment.ray.origin = spawnSurfaceRayOrigin(
+                    intersect,
+                    geometricNormal,
+                    sample.direction,
+                    shadingMaterial,
+                    material.alphaMode);
                 pathSegment.ray.direction = sample.direction;
                 pathSegment.ignoreTriangleIndex = (shadingMaterial.doubleSided && material.alphaMode == 1)
                     ? intersection.triangleIndex
@@ -2307,7 +2561,6 @@ void pathtrace(uchar4* pbo, int frame, int iter)
     const int traceDepth = hst_scene->state.traceDepth;
     const Camera& cam = hst_scene->state.camera;
     const int pixelcount = cam.resolution.x * cam.resolution.y;
-    const int geoms_size = static_cast<int>(hst_scene->geoms.size());
     const int sceneBvhNodeCount = static_cast<int>(hst_scene->sceneBvhNodes.size());
     const int triangleBvhNodeCount = static_cast<int>(hst_scene->triangleBvhNodes.size());
 
@@ -2331,12 +2584,13 @@ void pathtrace(uchar4* pbo, int frame, int iter)
     int num_paths = static_cast<int>(dev_path_end - dev_paths);
     const bool useMaterialSort = (guiData != NULL) && guiData->UseMaterialSort;
     const bool enableKernelTiming = (guiData != NULL) && guiData->EnableKernelTiming;
-    const int sortEveryNIterations =
-        (guiData != NULL && guiData->SortEveryNIterations > 0) ? guiData->SortEveryNIterations : 1;
-    const int sortMaxBounce =
-        (guiData != NULL && guiData->SortMaxBounce > 0) ? guiData->SortMaxBounce : traceDepth;
-    const int sortMinPathCount =
-        (guiData != NULL && guiData->SortMinPathCount > 0) ? guiData->SortMinPathCount : 1;
+    const bool enableFireflyMitigation = (guiData != NULL) && guiData->EnableFireflyMitigation;
+    const float maxNonDeltaSampleLuminance = (guiData != NULL)
+        ? guiData->MaxNonDeltaSampleLuminance
+        : RENDER_CONFIG_MAX_NON_DELTA_SAMPLE_LUMINANCE;
+    const float maxPathThroughputLuminance = (guiData != NULL)
+        ? guiData->MaxPathThroughputLuminance
+        : RENDER_CONFIG_MAX_PATH_THROUGHPUT_LUMINANCE;
     float totalSortTimeMs = 0.0f;
     float totalShadeTimeMs = 0.0f;
     int totalShadedPaths = 0;
@@ -2385,15 +2639,7 @@ void pathtrace(uchar4* pbo, int frame, int iter)
 
         // --- Shading Stage ---
         // Shade path segments based on intersections and generate the next rays.
-        const bool shouldSortThisIteration = ((iter - 1) % sortEveryNIterations) == 0;
-        const bool shouldSortThisBounce = depth <= sortMaxBounce;
-        const bool shouldSortThisPathCount = num_paths >= sortMinPathCount;
-
-        if (useMaterialSort
-            && shouldSortThisIteration
-            && shouldSortThisBounce
-            && shouldSortThisPathCount
-            && num_paths > 1)
+        if (useMaterialSort && num_paths > 1)
         {
             std::pair<cudaEvent_t, cudaEvent_t> sortTiming{};
             if (enableKernelTiming)
@@ -2409,33 +2655,37 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             );
             checkCUDAError("build material sort keys");
 
+            thrust::sequence(
+                thrust::device,
+                dev_pathSortIndices,
+                dev_pathSortIndices + num_paths);
+            checkCUDAError("build path sort indices");
+
             thrust::sort_by_key(
                 thrust::device,
                 dev_materialSortKeys,
                 dev_materialSortKeys + num_paths,
-                dev_paths
+                dev_pathSortIndices
             );
-            checkCUDAError("sort paths by material");
+            checkCUDAError("sort path indices by material");
+
+            reorderSortedPathState<<<numblocksPathSegmentTracing, blockSize1d>>>(
+                num_paths,
+                dev_pathSortIndices,
+                dev_paths,
+                dev_intersections,
+                dev_pathsScratch,
+                dev_intersectionsScratch
+            );
+            checkCUDAError("reorder sorted path state");
+
+            std::swap(dev_paths, dev_pathsScratch);
+            std::swap(dev_intersections, dev_intersectionsScratch);
             if (enableKernelTiming)
             {
                 checkCUDAResult(cudaEventRecord(sortTiming.second), "record sort stop event");
                 sortTimings.push_back(sortTiming);
             }
-
-            computeIntersections<<<numblocksPathSegmentTracing, blockSize1d>>>(
-                num_paths,
-                dev_paths,
-                dev_geoms,
-                dev_meshInstances,
-                dev_scenePrimitives,
-                dev_sceneBvhNodes,
-                sceneBvhNodeCount,
-                dev_triangles,
-                dev_triangleBvhNodes,
-                triangleBvhNodeCount,
-                dev_intersections
-            );
-            checkCUDAError("retrace sorted paths");
         }
 
         std::pair<cudaEvent_t, cudaEvent_t> shadeTiming{};
@@ -2456,7 +2706,6 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             dev_scenePrimitives,
             dev_sceneBvhNodes,
             sceneBvhNodeCount,
-            geoms_size,
             dev_triangles,
             dev_triangleBvhNodes,
             triangleBvhNodeCount,
@@ -2471,6 +2720,9 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             dev_lightGeomIndices,
             dev_geomLightSelectionPmf,
             hst_lightGeomCount,
+            enableFireflyMitigation ? 1 : 0,
+            maxNonDeltaSampleLuminance,
+            maxPathThroughputLuminance,
             guiData ? guiData->RenderDebugModeValue : RENDER_DEBUG_NONE,
             dev_image
         );
@@ -2537,16 +2789,6 @@ void pathtrace(uchar4* pbo, int frame, int iter)
 
     checkCUDAError("pathtrace");
 }
-
-
-
-
-
-
-
-
-
-
 
 
 

@@ -69,7 +69,10 @@ __host__ __device__ float evaluateBsdfPdf(
  */
 __host__ __device__ void scatterRay(
     const Ray& ray,
-    glm::vec3 normal,
+    glm::vec3 shadingNormal,
+    glm::vec3 geometricNormal,
     const Material& m,
     thrust::default_random_engine& rng,
+    int enableFireflyMitigation,
+    float maxNonDeltaSampleLuminance,
     BSDFSample& sample);
