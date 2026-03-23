@@ -159,10 +159,17 @@ struct Camera
     glm::vec2 pixelLength;
 };
 
+enum EnvironmentMode
+{
+    ENVIRONMENT_NONE = 0,
+    ENVIRONMENT_PROCEDURAL_SKY = 1,
+    ENVIRONMENT_HDR = 2
+};
+
 struct EnvironmentSettings
 {
+    int mode = ENVIRONMENT_PROCEDURAL_SKY;
     int textureId = -1;
-    int useProceduralSky = 1;
     float intensity = 1.0f;
     float rotation = 0.0f;
     glm::vec3 zenithColor = glm::vec3(0.55f, 0.72f, 1.0f);

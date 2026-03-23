@@ -2,7 +2,9 @@
 
 #include "sceneStructs.h"
 
+#include <filesystem>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 enum class SceneObjectType
@@ -48,6 +50,10 @@ public:
     void updateMaterial(
         size_t materialIndex,
         const Material& material);
+    bool updateEnvironment(
+        const EnvironmentSettings& environment,
+        const std::string& hdrPath,
+        std::string& outError);
 
     std::vector<SceneObject> objects;
     std::vector<Geom> geoms;
@@ -61,5 +67,8 @@ public:
     std::vector<TextureData> textures;
     std::vector<glm::vec4> texturePixels;
     RenderState state;
+    std::filesystem::path sourceScenePath;
+    std::string environmentTexturePath;
+    std::unordered_map<std::string, uint32_t> texturePathToIdCache;
     bool gpuDynamicDataDirty = true;
 };

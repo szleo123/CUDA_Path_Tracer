@@ -86,6 +86,8 @@ static bool showSceneObjectsWindow = true;
 static bool showViewportGizmo = true;
 static bool objectManipulationActive = false;
 static bool cudaSceneInitialized = false;
+static char environmentFilePathBuffer[1024] = {};
+static std::string environmentUiMessage;
 static double manipulationStartX = 0.0;
 static double manipulationStartY = 0.0;
 static glm::vec3 manipulationStartTranslation(0.0f);
@@ -108,6 +110,8 @@ namespace
 {
 void applyObjectTransform(int objectIndex, const glm::vec3& translation, const glm::vec3& rotation, const glm::vec3& scale);
 void applyMaterialProperties(int materialId, const Material& material);
+void syncEnvironmentUiFromScene();
+void applyEnvironmentSettings(const EnvironmentSettings& environment, const std::string& hdrPath);
 
 bool isInspectorVisible()
 {
@@ -220,6 +224,21 @@ const char* getMaterialDisplayName(int materialId)
 bool hasNonZeroColor(const glm::vec3& color)
 {
     return glm::dot(color, color) > 1.0e-8f;
+}
+
+void syncEnvironmentUiFromScene()
+{
+    environmentFilePathBuffer[0] = '\0';
+    if (scene == nullptr || scene->environmentTexturePath.empty())
+    {
+        return;
+    }
+
+    std::snprintf(
+        environmentFilePathBuffer,
+        sizeof(environmentFilePathBuffer),
+        "%s",
+        scene->environmentTexturePath.c_str());
 }
 
 bool editMaterialControls(Material& material)
@@ -546,6 +565,58 @@ void renderAnalyticsSection()
     if (ImGui::SliderFloat("Exposure", &imguiData->ExposureValue, -5.0f, 5.0f, "%.2f EV"))
     {
         iteration = 0;
+    }
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("Environment");
+    EnvironmentSettings environment = scene->state.environment;
+    int environmentMode = environment.mode;
+    const char* environmentModeLabels[] = { "None", "Procedural Sky", "HDR File" };
+    if (ImGui::Combo("Environment Mode", &environmentMode, environmentModeLabels, IM_ARRAYSIZE(environmentModeLabels)))
+    {
+        environment.mode = environmentMode;
+        applyEnvironmentSettings(environment, environmentFilePathBuffer);
+    }
+
+    if (environment.mode == ENVIRONMENT_PROCEDURAL_SKY)
+    {
+        if (ImGui::SliderFloat("Sky Intensity", &environment.intensity, 0.0f, 10.0f, "%.2f"))
+        {
+            applyEnvironmentSettings(environment, environmentFilePathBuffer);
+        }
+        if (ImGui::ColorEdit3("Sky Zenith", &environment.zenithColor[0]))
+        {
+            applyEnvironmentSettings(environment, environmentFilePathBuffer);
+        }
+        if (ImGui::ColorEdit3("Sky Horizon", &environment.horizonColor[0]))
+        {
+            applyEnvironmentSettings(environment, environmentFilePathBuffer);
+        }
+        if (ImGui::ColorEdit3("Ground Color", &environment.groundColor[0]))
+        {
+            applyEnvironmentSettings(environment, environmentFilePathBuffer);
+        }
+    }
+    else if (environment.mode == ENVIRONMENT_HDR)
+    {
+        if (ImGui::SliderFloat("HDR Intensity", &environment.intensity, 0.0f, 10.0f, "%.2f"))
+        {
+            applyEnvironmentSettings(environment, environmentFilePathBuffer);
+        }
+        if (ImGui::SliderFloat("HDR Rotation", &environment.rotation, -180.0f, 180.0f, "%.1f deg"))
+        {
+            applyEnvironmentSettings(environment, environmentFilePathBuffer);
+        }
+        ImGui::InputText("HDR File", environmentFilePathBuffer, IM_ARRAYSIZE(environmentFilePathBuffer));
+        if (ImGui::Button("Load HDR"))
+        {
+            applyEnvironmentSettings(environment, environmentFilePathBuffer);
+        }
+    }
+
+    if (!environmentUiMessage.empty())
+    {
+        ImGui::TextWrapped("%s", environmentUiMessage.c_str());
     }
 
     const char* renderDebugLabels[] = { "None", "Mesh UV Checker", "Mesh Base Color", "Mesh Texture Only" };
@@ -1148,6 +1219,26 @@ void applyMaterialProperties(int materialId, const Material& material)
     renderState = &scene->state;
 }
 
+void applyEnvironmentSettings(const EnvironmentSettings& environment, const std::string& hdrPath)
+{
+    if (scene == nullptr)
+    {
+        return;
+    }
+
+    std::string error;
+    if (!scene->updateEnvironment(environment, hdrPath, error))
+    {
+        environmentUiMessage = error;
+        return;
+    }
+
+    environmentUiMessage.clear();
+    syncEnvironmentUiFromScene();
+    iteration = 0;
+    renderState = &scene->state;
+}
+
 void applyViewportManipulation(double xpos, double ypos)
 {
     if (!objectManipulationActive
@@ -1628,6 +1719,7 @@ int main(int argc, char** argv)
     // Initialize ImGui Data
     InitImguiData(guiData);
     InitDataContainer(guiData);
+    syncEnvironmentUiFromScene();
 
     // GLFW main loop
     mainLoop();

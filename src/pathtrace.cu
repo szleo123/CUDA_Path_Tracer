@@ -210,7 +210,7 @@ void uploadEnvironmentSamplingData(const Scene* scene)
     dev_environmentHeight = 0;
 
     const EnvironmentSettings& environment = scene->state.environment;
-    if (environment.useProceduralSky || environment.textureId < 0)
+    if (environment.mode != ENVIRONMENT_HDR || environment.textureId < 0)
     {
         return;
     }
@@ -458,7 +458,10 @@ void pathtraceUpdateScene(Scene* scene)
     uploadVectorToDevice(dev_meshInstances, dev_meshInstanceCount, scene->meshInstances);
     uploadVectorToDevice(dev_scenePrimitives, dev_scenePrimitiveCount, scene->scenePrimitives);
     uploadVectorToDevice(dev_sceneBvhNodes, dev_sceneBvhNodeCount, scene->sceneBvhNodes);
+    uploadVectorToDevice(dev_textures, dev_textureCount, scene->textures);
+    uploadVectorToDevice(dev_texturePixels, dev_texturePixelCount, scene->texturePixels);
     uploadLightGeomData(scene);
+    uploadEnvironmentSamplingData(scene);
     scene->gpuDynamicDataDirty = false;
     checkCUDAError("pathtraceUpdateScene");
 }
@@ -1507,14 +1510,18 @@ __device__ inline glm::vec3 sampleEnvironment(
     const glm::vec4* texturePixels)
 {
     glm::vec3 radiance(0.0f);
-    if (!environment.useProceduralSky && environment.textureId >= 0)
+    if (environment.mode == ENVIRONMENT_HDR && environment.textureId >= 0)
     {
         const glm::vec2 uv = directionToEnvironmentUv(direction, environment.rotation);
         radiance = sampleTextureRgb(textures[environment.textureId], uv, texturePixels);
     }
-    else
+    else if (environment.mode == ENVIRONMENT_PROCEDURAL_SKY)
     {
         radiance = evaluateProceduralSky(environment, direction);
+    }
+    else
+    {
+        radiance = glm::vec3(0.0f);
     }
 
     return radiance * environment.intensity;
@@ -1529,7 +1536,7 @@ __device__ inline bool hasEnvironmentImportanceSampling(
     int environmentWidth,
     int environmentHeight)
 {
-    return !environment.useProceduralSky
+    return environment.mode == ENVIRONMENT_HDR
         && environment.textureId >= 0
         && textures != nullptr
         && environmentTexelPmf != nullptr
@@ -1547,7 +1554,7 @@ __device__ inline float evaluateEnvironmentPdf(
     int environmentWidth,
     int environmentHeight)
 {
-    if (environment.useProceduralSky
+    if (environment.mode != ENVIRONMENT_HDR
         || environment.textureId < 0
         || textures == nullptr
         || environmentTexelPmf == nullptr
@@ -2530,8 +2537,6 @@ void pathtrace(uchar4* pbo, int frame, int iter)
 
     checkCUDAError("pathtrace");
 }
-
-
 
 
 

@@ -895,12 +895,13 @@ void configureCameraFromJson(const json& cameraData, RenderState& renderState)
     std::fill(renderState.image.begin(), renderState.image.end(), glm::vec3(0.0f));
 }
 
-void configureEnvironmentFromJson(
+std::string configureEnvironmentFromJson(
     const json& data,
     const SceneImportContext& importContext,
     RenderState& renderState)
 {
     EnvironmentSettings environment{};
+    std::string environmentTexturePath;
 
     if (data.contains("Environment"))
     {
@@ -923,7 +924,18 @@ void configureEnvironmentFromJson(
         if (environmentData.contains("TYPE"))
         {
             const std::string type = environmentData["TYPE"];
-            environment.useProceduralSky = (type != "HDR");
+            if (type == "HDR")
+            {
+                environment.mode = ENVIRONMENT_HDR;
+            }
+            else if (type == "NONE")
+            {
+                environment.mode = ENVIRONMENT_NONE;
+            }
+            else
+            {
+                environment.mode = ENVIRONMENT_PROCEDURAL_SKY;
+            }
         }
         if (environmentData.contains("FILE"))
         {
@@ -933,11 +945,17 @@ void configureEnvironmentFromJson(
                 importContext.texturePathToId,
                 importContext.textures,
                 importContext.texturePixels);
-            environment.useProceduralSky = 0;
+            environment.mode = ENVIRONMENT_HDR;
+            environmentTexturePath = hdrPath.string();
         }
     }
 
     renderState.environment = environment;
+    if (environment.mode != ENVIRONMENT_HDR)
+    {
+        renderState.environment.textureId = -1;
+    }
+    return environmentTexturePath;
 }
 }
 
@@ -1071,11 +1089,11 @@ void Scene::updateMaterial(
 
 void Scene::loadFromJSON(const std::string& jsonName)
 {
-    const std::filesystem::path scenePath = std::filesystem::absolute(jsonName);
-    std::ifstream f(scenePath);
+    sourceScenePath = std::filesystem::absolute(jsonName);
+    std::ifstream f(sourceScenePath);
     if (!f)
     {
-        throw std::runtime_error("Failed to open scene file: " + scenePath.string());
+        throw std::runtime_error("Failed to open scene file: " + sourceScenePath.string());
     }
 
     json data = json::parse(f);
@@ -1083,7 +1101,7 @@ void Scene::loadFromJSON(const std::string& jsonName)
     std::unordered_map<std::string, uint32_t> texturePathToId;
     std::unordered_map<std::string, uint32_t> importedMaterialKeyToId;
     SceneImportContext importContext{
-        scenePath,
+        sourceScenePath,
         materialNameToId,
         texturePathToId,
         importedMaterialKeyToId,
@@ -1095,10 +1113,62 @@ void Scene::loadFromJSON(const std::string& jsonName)
 
     loadMaterialsFromJson(data["Materials"], importContext);
     loadObjectsFromJson(data["Objects"], importContext, objects);
+    texturePathToIdCache = texturePathToId;
 
     rebuildStaticMeshData();
     rebuildRenderData();
     configureCameraFromJson(data["Camera"], state);
-    configureEnvironmentFromJson(data, importContext, state);
+    environmentTexturePath = configureEnvironmentFromJson(data, importContext, state);
+}
+
+bool Scene::updateEnvironment(
+    const EnvironmentSettings& environment,
+    const std::string& hdrPath,
+    std::string& outError)
+{
+    EnvironmentSettings updatedEnvironment = environment;
+
+    if (updatedEnvironment.mode == ENVIRONMENT_HDR)
+    {
+        std::string resolvedPathString = hdrPath.empty() ? environmentTexturePath : hdrPath;
+        if (resolvedPathString.empty())
+        {
+            outError = "HDR environment file path is empty.";
+            return false;
+        }
+
+        try
+        {
+            std::filesystem::path resolvedPath(resolvedPathString);
+            if (resolvedPath.is_relative())
+            {
+                const std::filesystem::path basePath = sourceScenePath.empty()
+                    ? std::filesystem::current_path()
+                    : sourceScenePath.parent_path();
+                resolvedPath = basePath / resolvedPath;
+            }
+
+            resolvedPath = std::filesystem::weakly_canonical(resolvedPath);
+            updatedEnvironment.textureId = ensureHdrTextureLoaded(
+                resolvedPath,
+                texturePathToIdCache,
+                textures,
+                texturePixels);
+            environmentTexturePath = resolvedPath.string();
+        }
+        catch (const std::exception& e)
+        {
+            outError = e.what();
+            return false;
+        }
+    }
+    else
+    {
+        updatedEnvironment.textureId = -1;
+    }
+
+    state.environment = updatedEnvironment;
+    gpuDynamicDataDirty = true;
+    return true;
 }
 
