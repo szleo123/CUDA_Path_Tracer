@@ -3,6 +3,7 @@
 #include "mesh.h"
 #include "bvh.h"
 #include "utilities.h"
+#include "water.h"
 
 #include <glm/gtc/matrix_inverse.hpp>
 #include <glm/gtx/string_cast.hpp>
@@ -92,6 +93,10 @@ SceneObjectType parseSceneObjectType(const std::string& type)
     {
         return SceneObjectType::Cube;
     }
+    if (type == "water")
+    {
+        return SceneObjectType::Water;
+    }
     if (type == "mesh")
     {
         return SceneObjectType::Mesh;
@@ -99,10 +104,183 @@ SceneObjectType parseSceneObjectType(const std::string& type)
     return SceneObjectType::Sphere;
 }
 
+Geom::WaterSettings defaultWaterSettings()
+{
+    Geom::WaterSettings water{};
+    water.uvScale = glm::vec2(6.0f);
+    water.absorptionCoefficient = glm::vec3(0.10f, 0.04f, 0.02f);
+    water.foamColor = glm::vec3(0.94f, 0.97f, 1.0f);
+    water.shallowColor = glm::vec3(0.36f, 0.74f, 0.72f);
+    water.fallbackAbsorptionDistance = 10.0f;
+    water.foamIntensity = 0.35f;
+    water.foamThreshold = 0.58f;
+    water.foamSoftness = 0.18f;
+    water.foamRoughness = 0.48f;
+    water.shallowColorDistance = 2.5f;
+    water.shallowColorStrength = 0.65f;
+    water.shorelineFoamDistance = 0.90f;
+    water.shorelineFoamIntensity = 0.75f;
+    water.infinitePlane = 0;
+    water.waveCount = 8;
+    water.waves[0].direction = glm::vec2(1.0f, 0.18f);
+    water.waves[0].amplitude = 0.050f;
+    water.waves[0].wavelength = 1.60f;
+    water.waves[0].speed = 0.90f;
+    water.waves[0].steepness = 0.30f;
+    water.waves[1].direction = glm::vec2(0.82f, 0.35f);
+    water.waves[1].amplitude = 0.028f;
+    water.waves[1].wavelength = 1.05f;
+    water.waves[1].speed = 1.15f;
+    water.waves[1].steepness = 0.28f;
+    water.waves[2].direction = glm::vec2(-0.20f, 1.0f);
+    water.waves[2].amplitude = 0.020f;
+    water.waves[2].wavelength = 0.60f;
+    water.waves[2].speed = 1.55f;
+    water.waves[2].steepness = 0.42f;
+    water.waves[3].direction = glm::vec2(0.45f, 1.0f);
+    water.waves[3].amplitude = 0.015f;
+    water.waves[3].wavelength = 0.44f;
+    water.waves[3].speed = 1.95f;
+    water.waves[3].steepness = 0.45f;
+    water.waves[4].direction = glm::vec2(-0.85f, 0.35f);
+    water.waves[4].amplitude = 0.011f;
+    water.waves[4].wavelength = 0.34f;
+    water.waves[4].speed = 2.20f;
+    water.waves[4].steepness = 0.38f;
+    water.waves[5].direction = glm::vec2(1.0f, -0.50f);
+    water.waves[5].amplitude = 0.007f;
+    water.waves[5].wavelength = 0.19f;
+    water.waves[5].speed = 2.90f;
+    water.waves[5].steepness = 0.50f;
+    water.waves[6].direction = glm::vec2(-0.55f, -1.0f);
+    water.waves[6].amplitude = 0.005f;
+    water.waves[6].wavelength = 0.14f;
+    water.waves[6].speed = 3.60f;
+    water.waves[6].steepness = 0.52f;
+    water.waves[7].direction = glm::vec2(0.18f, -1.0f);
+    water.waves[7].amplitude = 0.004f;
+    water.waves[7].wavelength = 0.10f;
+    water.waves[7].speed = 4.20f;
+    water.waves[7].steepness = 0.48f;
+    water.maxVerticalDisplacement = computeWaterMaxVerticalDisplacement(water);
+    return water;
+}
+
+Geom::WaterSettings::Wave parseWaterWaveDefinition(const json& waveJson)
+{
+    Geom::WaterSettings::Wave wave{};
+    if (waveJson.contains("DIR"))
+    {
+        wave.direction = glm::vec2(waveJson["DIR"][0], waveJson["DIR"][1]);
+    }
+    wave.amplitude = waveJson.value("AMPLITUDE", 0.0f);
+    wave.wavelength = glm::max(waveJson.value("WAVELENGTH", 1.0f), 0.001f);
+    wave.speed = waveJson.value("SPEED", 1.0f);
+    wave.steepness = glm::clamp(waveJson.value("STEEPNESS", 0.0f), 0.0f, 1.5f);
+    return wave;
+}
+
+Geom::WaterSettings parseWaterSettings(const json& objectJson)
+{
+    Geom::WaterSettings water = defaultWaterSettings();
+    if (!objectJson.contains("WATER"))
+    {
+        return water;
+    }
+
+    const json& waterJson = objectJson["WATER"];
+    if (waterJson.contains("UV_SCALE"))
+    {
+        water.uvScale = glm::vec2(waterJson["UV_SCALE"][0], waterJson["UV_SCALE"][1]);
+    }
+    if (waterJson.contains("ABSORPTION_COEFF"))
+    {
+        water.absorptionCoefficient = glm::vec3(
+            waterJson["ABSORPTION_COEFF"][0],
+            waterJson["ABSORPTION_COEFF"][1],
+            waterJson["ABSORPTION_COEFF"][2]);
+    }
+    if (waterJson.contains("FOAM_COLOR"))
+    {
+        water.foamColor = glm::vec3(
+            waterJson["FOAM_COLOR"][0],
+            waterJson["FOAM_COLOR"][1],
+            waterJson["FOAM_COLOR"][2]);
+    }
+    if (waterJson.contains("SHALLOW_COLOR"))
+    {
+        water.shallowColor = glm::vec3(
+            waterJson["SHALLOW_COLOR"][0],
+            waterJson["SHALLOW_COLOR"][1],
+            waterJson["SHALLOW_COLOR"][2]);
+    }
+    water.fallbackAbsorptionDistance = glm::max(
+        waterJson.value("FALLBACK_ABSORPTION_DISTANCE", water.fallbackAbsorptionDistance),
+        0.0f);
+    water.foamIntensity = glm::max(
+        waterJson.value("FOAM_INTENSITY", water.foamIntensity),
+        0.0f);
+    water.foamThreshold = glm::clamp(
+        waterJson.value("FOAM_THRESHOLD", water.foamThreshold),
+        0.0f,
+        2.0f);
+    water.foamSoftness = glm::max(
+        waterJson.value("FOAM_SOFTNESS", water.foamSoftness),
+        0.001f);
+    water.foamRoughness = glm::clamp(
+        waterJson.value("FOAM_ROUGHNESS", water.foamRoughness),
+        0.0f,
+        1.0f);
+    water.shallowColorDistance = glm::max(
+        waterJson.value("SHALLOW_COLOR_DISTANCE", water.shallowColorDistance),
+        0.0f);
+    water.shallowColorStrength = glm::clamp(
+        waterJson.value("SHALLOW_COLOR_STRENGTH", water.shallowColorStrength),
+        0.0f,
+        1.0f);
+    water.shorelineFoamDistance = glm::max(
+        waterJson.value("SHORELINE_FOAM_DISTANCE", water.shorelineFoamDistance),
+        0.0f);
+    water.shorelineFoamIntensity = glm::max(
+        waterJson.value("SHORELINE_FOAM_INTENSITY", water.shorelineFoamIntensity),
+        0.0f);
+    water.infinitePlane = waterJson.value("INFINITE", water.infinitePlane != 0) ? 1 : 0;
+
+    if (waterJson.contains("WAVES") && waterJson["WAVES"].is_array())
+    {
+        const size_t parsedWaveCount = std::min(
+            waterJson["WAVES"].size(),
+            static_cast<size_t>(RENDER_CONFIG_MAX_GERSTNER_WAVES));
+        water.waveCount = static_cast<int>(parsedWaveCount);
+        for (size_t waveIndex = 0; waveIndex < parsedWaveCount; ++waveIndex)
+        {
+            water.waves[waveIndex] = parseWaterWaveDefinition(waterJson["WAVES"][waveIndex]);
+        }
+        for (size_t waveIndex = parsedWaveCount; waveIndex < RENDER_CONFIG_MAX_GERSTNER_WAVES; ++waveIndex)
+        {
+            water.waves[waveIndex] = Geom::WaterSettings::Wave{};
+        }
+    }
+
+    water.maxVerticalDisplacement = computeWaterMaxVerticalDisplacement(water);
+    return water;
+}
+
 Geom buildGeomFromObject(const SceneObject& object, int objectIndex)
 {
     Geom geom{};
-    geom.type = (object.type == SceneObjectType::Cube) ? CUBE : SPHERE;
+    if (object.type == SceneObjectType::Cube)
+    {
+        geom.type = CUBE;
+    }
+    else if (object.type == SceneObjectType::Water)
+    {
+        geom.type = WATER_PLANE;
+    }
+    else
+    {
+        geom.type = SPHERE;
+    }
     geom.materialid = object.materialId;
     geom.objectIndex = objectIndex;
     geom.translation = object.translation;
@@ -111,6 +289,7 @@ Geom buildGeomFromObject(const SceneObject& object, int objectIndex)
     geom.transform = utilityCore::buildTransformationMatrix(object.translation, object.rotation, object.scale);
     geom.inverseTransform = glm::inverse(geom.transform);
     geom.invTranspose = glm::inverseTranspose(geom.transform);
+    geom.water = object.water;
     return geom;
 }
 
@@ -147,13 +326,20 @@ void appendGeomPrimitive(
     int geomIndex,
     std::vector<ScenePrimitive>& scenePrimitives)
 {
+    glm::vec3 localMin(-0.5f);
+    glm::vec3 localMax(0.5f);
+    if (geom.type == WATER_PLANE)
+    {
+        getWaterLocalBounds(geom.water, localMin, localMax);
+    }
+
     ScenePrimitive primitive{};
     primitive.type = SCENE_PRIMITIVE_GEOM;
     primitive.index = geomIndex;
     computeTransformedBounds(
         geom.transform,
-        glm::vec3(-0.5f),
-        glm::vec3(0.5f),
+        localMin,
+        localMax,
         primitive.bboxMin,
         primitive.bboxMax);
     scenePrimitives.push_back(primitive);
@@ -210,6 +396,8 @@ std::string defaultObjectName(SceneObjectType type, int index)
     {
     case SceneObjectType::Cube:
         return "Cube " + std::to_string(index);
+    case SceneObjectType::Water:
+        return "Water " + std::to_string(index);
     case SceneObjectType::Mesh:
         return "Mesh " + std::to_string(index);
     default:
@@ -410,6 +598,7 @@ static glm::vec3 dielectricF0FromIor(
 }
 
 int ensureImportedTextureLoaded(
+    const std::filesystem::path& meshPath,
     const std::filesystem::path& texturePath,
     const std::string& embeddedTextureKey,
     const std::vector<unsigned char>& textureBytes,
@@ -422,7 +611,7 @@ int ensureImportedTextureLoaded(
     std::vector<glm::vec4>& texturePixels)
 {
     const std::string textureKey = !embeddedTextureKey.empty()
-        ? embeddedTextureKey
+        ? (meshPath.string() + "|embedded|" + embeddedTextureKey)
         : (texturePath.empty()
             ? std::string()
             : std::filesystem::weakly_canonical(texturePath).string());
@@ -528,7 +717,15 @@ int registerImportedMaterial(
     material.clearcoatRoughness = importedMaterial.clearcoatRoughnessFactor;
     material.occlusionStrength = importedMaterial.occlusionStrength;
     material.ambientOcclusion = 1.0f;
-    material.hasReflective = fmaxf(material.hasReflective, importedMaterial.metallicFactor);
+    const float importedDielectricReflectivity = glm::clamp(
+        glm::max(
+            glm::max(material.specularColor.r, material.specularColor.g),
+            material.specularColor.b) * 12.0f,
+        0.0f,
+        1.0f);
+    material.hasReflective = fmaxf(
+        material.hasReflective,
+        fmaxf(importedMaterial.metallicFactor, importedDielectricReflectivity));
     material.hasRefractive = fmaxf(material.hasRefractive, importedMaterial.transmissionFactor);
     if (glm::length(importedMaterial.emissiveFactor) > 0.0f
         || !importedMaterial.emissiveTextureBytes.empty()
@@ -537,6 +734,7 @@ int registerImportedMaterial(
         material.emittance = importedMaterial.emissiveStrength;
     }
     material.textureId = ensureImportedTextureLoaded(
+        meshPath,
         importedMaterial.diffuseTexturePath,
         importedMaterial.diffuseTextureKey,
         importedMaterial.diffuseTextureBytes,
@@ -548,6 +746,7 @@ int registerImportedMaterial(
         textures,
         texturePixels);
     material.metallicRoughnessTextureId = ensureImportedTextureLoaded(
+        meshPath,
         importedMaterial.metallicRoughnessTexturePath,
         importedMaterial.metallicRoughnessTextureKey,
         importedMaterial.metallicRoughnessTextureBytes,
@@ -559,6 +758,7 @@ int registerImportedMaterial(
         textures,
         texturePixels);
     material.normalTextureId = ensureImportedTextureLoaded(
+        meshPath,
         importedMaterial.normalTexturePath,
         importedMaterial.normalTextureKey,
         importedMaterial.normalTextureBytes,
@@ -570,6 +770,7 @@ int registerImportedMaterial(
         textures,
         texturePixels);
     material.emissiveTextureId = ensureImportedTextureLoaded(
+        meshPath,
         importedMaterial.emissiveTexturePath,
         importedMaterial.emissiveTextureKey,
         importedMaterial.emissiveTextureBytes,
@@ -581,6 +782,7 @@ int registerImportedMaterial(
         textures,
         texturePixels);
     material.occlusionTextureId = ensureImportedTextureLoaded(
+        meshPath,
         importedMaterial.occlusionTexturePath,
         importedMaterial.occlusionTextureKey,
         importedMaterial.occlusionTextureBytes,
@@ -681,6 +883,7 @@ Material parseMaterialDefinition(
     }
     else if (matType == "Refractive" || matType == "Glass")
     {
+        material.hasReflective = materialJson.value("REFLECTIVITY", material.hasReflective);
         material.hasRefractive = materialJson.value("REFRACTIVITY", 1.0f);
     }
     else
@@ -836,6 +1039,11 @@ SceneObject parseSceneObjectDefinition(
     object.scale = parseVec3(objectJson["SCALE"]);
     object.usedMaterialIds.push_back(object.materialId);
 
+    if (object.type == SceneObjectType::Water)
+    {
+        object.water = parseWaterSettings(objectJson);
+    }
+
     if (object.type == SceneObjectType::Mesh)
     {
         object.meshPath = objectJson["FILE"];
@@ -895,6 +1103,26 @@ void configureCameraFromJson(const json& cameraData, RenderState& renderState)
     const int pixelCount = camera.resolution.x * camera.resolution.y;
     renderState.image.resize(pixelCount);
     std::fill(renderState.image.begin(), renderState.image.end(), glm::vec3(0.0f));
+}
+
+void configureAnimationFromJson(const json& data, RenderState& renderState)
+{
+    renderState.sceneTimeSeconds = 0.0f;
+    renderState.frameDeltaTimeSeconds = 0.0f;
+    renderState.stepDeltaTimeSeconds = 1.0f / 60.0f;
+    renderState.playbackSpeed = 1.0f;
+    renderState.playAnimation = 0;
+
+    if (!data.contains("Animation"))
+    {
+        return;
+    }
+
+    const json& animationData = data["Animation"];
+    renderState.sceneTimeSeconds = animationData.value("TIME", 0.0f);
+    renderState.stepDeltaTimeSeconds = glm::max(animationData.value("STEP_DT", 1.0f / 60.0f), 0.0f);
+    renderState.playbackSpeed = glm::max(animationData.value("SPEED", 1.0f), 0.0f);
+    renderState.playAnimation = animationData.value("PLAY", false) ? 1 : 0;
 }
 
 std::string configureEnvironmentFromJson(
@@ -1089,6 +1317,20 @@ void Scene::updateMaterial(
     gpuDynamicDataDirty = true;
 }
 
+void Scene::updateWaterSettings(
+    size_t objectIndex,
+    const Geom::WaterSettings& water)
+{
+    if (objectIndex >= objects.size() || objects[objectIndex].type != SceneObjectType::Water)
+    {
+        return;
+    }
+
+    objects[objectIndex].water = water;
+    objects[objectIndex].water.maxVerticalDisplacement = computeWaterMaxVerticalDisplacement(objects[objectIndex].water);
+    rebuildRenderData();
+}
+
 void Scene::loadFromJSON(const std::string& jsonName)
 {
     sourceScenePath = std::filesystem::absolute(jsonName);
@@ -1120,6 +1362,7 @@ void Scene::loadFromJSON(const std::string& jsonName)
     rebuildStaticMeshData();
     rebuildRenderData();
     configureCameraFromJson(data["Camera"], state);
+    configureAnimationFromJson(data, state);
     environmentTexturePath = configureEnvironmentFromJson(data, importContext, state);
 }
 

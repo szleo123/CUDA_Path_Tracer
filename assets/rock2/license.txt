@@ -1,0 +1,11 @@
+Model Information:
+* title:	Big Rock 1B
+* source:	https://sketchfab.com/3d-models/big-rock-1b-44c96d506d55496598b6b92dec8b1049
+* author:	Andrei.D (https://sketchfab.com/Andrei_D)
+
+Model License:
+* license type:	CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+* requirements:	Author must be credited. Commercial use is allowed.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "Big Rock 1B" (https://sketchfab.com/3d-models/big-rock-1b-44c96d506d55496598b6b92dec8b1049) by Andrei.D (https://sketchfab.com/Andrei_D) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)

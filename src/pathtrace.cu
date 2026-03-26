@@ -821,17 +821,25 @@ __device__ bool intersectGeomDetailed(
     const Geom& geom,
     int geomIndex,
     const Ray& ray,
+    float sceneTimeSeconds,
     float maxDistance,
     TraceHit& outHit)
 {
     glm::vec3 point(0.0f);
     glm::vec3 normal(0.0f);
+    glm::vec3 geometricNormal(0.0f);
+    glm::vec3 tangent(0.0f);
+    glm::vec2 uv(0.0f);
     bool outside = false;
     float hitT = -1.0f;
 
     if (geom.type == CUBE)
     {
         hitT = boxIntersectionTest(geom, ray, point, normal, outside);
+    }
+    else if (geom.type == WATER_PLANE)
+    {
+        hitT = waterIntersectionTest(geom, ray, sceneTimeSeconds, point, normal, geometricNormal, tangent, uv, outside);
     }
     else
     {
@@ -843,14 +851,19 @@ __device__ bool intersectGeomDetailed(
         outHit.t = hitT;
         outHit.point = point;
         outHit.shadingNormal = normal;
-        outHit.geometricNormal = normal;
-        outHit.tangentSetMask = 0;
-        outHit.uvSetMask = 0;
+        outHit.geometricNormal = (geom.type == WATER_PLANE) ? geometricNormal : normal;
+        outHit.tangentSetMask = (geom.type == WATER_PLANE) ? 1 : 0;
+        outHit.uvSetMask = (geom.type == WATER_PLANE) ? 1 : 0;
         for (int uvSet = 0; uvSet < MAX_TEXTURE_UV_SETS; ++uvSet)
         {
             outHit.tangents[uvSet] = glm::vec3(0.0f);
             outHit.tangentSigns[uvSet] = 1.0f;
             outHit.uv[uvSet] = glm::vec2(0.0f);
+        }
+        if (geom.type == WATER_PLANE)
+        {
+            outHit.tangents[0] = tangent;
+            outHit.uv[0] = uv;
         }
         outHit.geomId = geomIndex;
         outHit.materialId = geom.materialid;
@@ -864,6 +877,7 @@ __device__ bool intersectGeomDetailed(
 __device__ bool traceSceneClosest(
     const Ray& ray,
     float maxDistance,
+    float sceneTimeSeconds,
     int ignoreGeomId,
     int ignoreTriangleIndex,
     const Geom* geoms,
@@ -920,7 +934,13 @@ __device__ bool traceSceneClosest(
                     }
 
                     TraceHit candidate{};
-                    if (intersectGeomDetailed(geoms[primitive.index], primitive.index, ray, outHit.t, candidate))
+                    if (intersectGeomDetailed(
+                        geoms[primitive.index],
+                        primitive.index,
+                        ray,
+                        sceneTimeSeconds,
+                        outHit.t,
+                        candidate))
                     {
                         outHit = candidate;
                     }
@@ -1013,8 +1033,12 @@ __global__ void computeIntersections(
     const Triangle* triangles,
     const TriangleBvhNode* triangleBvhNodes,
     int triangleBvhNodeCount,
+    float sceneTimeSeconds,
+    float frameDeltaTimeSeconds,
     ShadeableIntersection* intersections)
 {
+    (void)sceneTimeSeconds;
+    (void)frameDeltaTimeSeconds;
     int path_index = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (path_index < num_paths)
@@ -1030,6 +1054,7 @@ __global__ void computeIntersections(
         if (!traceSceneClosest(
             pathSegment.ray,
             FLT_MAX,
+            sceneTimeSeconds,
             -1,
             pathSegment.ignoreTriangleIndex,
             geoms,
@@ -1712,6 +1737,212 @@ __device__ inline glm::vec3 evaluateMeshDebugColor(
     }
 }
 
+__device__ inline glm::vec3 evaluateWaterDebugColor(
+    const ShadeableIntersection& intersection)
+{
+    const glm::vec2 uv = intersection.uv[0];
+    const glm::vec2 wrapped = glm::vec2(
+        uv.x - floorf(uv.x),
+        uv.y - floorf(uv.y));
+    const int cellX = static_cast<int>(floorf(wrapped.x * 12.0f));
+    const int cellY = static_cast<int>(floorf(wrapped.y * 12.0f));
+    const bool odd = ((cellX + cellY) & 1) != 0;
+    const glm::vec3 normal = glm::normalize(intersection.surfaceNormal);
+    const glm::vec3 normalColor = 0.5f * (normal + glm::vec3(1.0f));
+    const glm::vec3 checkerA(0.05f, 0.55f, 0.85f);
+    const glm::vec3 checkerB(0.70f, 0.95f, 1.00f);
+    return glm::mix(odd ? checkerA : checkerB, normalColor, 0.35f);
+}
+
+__device__ inline float evaluateWaterFoamMask(
+    const Geom& waterGeom,
+    const glm::vec3& worldSurfacePoint,
+    float timeSeconds)
+{
+    if (waterGeom.type != WATER_PLANE)
+    {
+        return 0.0f;
+    }
+
+    const glm::vec3 localSurfacePoint = waterMultiplyMV(
+        waterGeom.inverseTransform,
+        glm::vec4(worldSurfacePoint, 1.0f));
+    return evaluateWaterFoamAmountLocal(
+        waterGeom.water,
+        glm::vec2(localSurfacePoint.x, localSurfacePoint.z),
+        timeSeconds);
+}
+
+__device__ inline void applyWaterFoamToMaterial(
+    const Geom& waterGeom,
+    float foamMask,
+    Material& shadingMaterial)
+{
+    if (foamMask <= EPSILON)
+    {
+        return;
+    }
+
+    const float clampedFoam = glm::clamp(foamMask, 0.0f, 1.0f);
+    shadingMaterial.color = glm::mix(shadingMaterial.color, waterGeom.water.foamColor, clampedFoam);
+    shadingMaterial.roughness = glm::mix(
+        shadingMaterial.roughness,
+        glm::max(shadingMaterial.roughness, waterGeom.water.foamRoughness),
+        clampedFoam);
+    shadingMaterial.hasRefractive *= (1.0f - 0.92f * clampedFoam);
+    shadingMaterial.transmissionFactor *= (1.0f - 0.95f * clampedFoam);
+    shadingMaterial.metallic = 0.0f;
+    shadingMaterial.specularColor = glm::mix(
+        shadingMaterial.specularColor,
+        waterGeom.water.foamColor,
+        0.30f * clampedFoam);
+}
+
+__device__ inline float queryWaterSceneDepthBelowSurface(
+    const Geom& waterGeom,
+    float sceneTimeSeconds,
+    const glm::vec3& surfacePoint,
+    int waterGeomId,
+    const Geom* geoms,
+    const MeshInstance* meshInstances,
+    const ScenePrimitive* scenePrimitives,
+    const SceneBvhNode* sceneBvhNodes,
+    int sceneBvhNodeCount,
+    const Triangle* triangles,
+    const TriangleBvhNode* triangleBvhNodes,
+    int triangleBvhNodeCount,
+    float maxQueryDepth)
+{
+    if (maxQueryDepth <= EPSILON)
+    {
+        return maxQueryDepth;
+    }
+
+    Ray depthRay;
+    depthRay.direction = glm::vec3(0.0f, -1.0f, 0.0f);
+    depthRay.origin = offsetRayOriginAlongDirection(surfacePoint, depthRay.direction, 4.0f);
+
+    TraceHit hit{};
+    if (!traceSceneClosest(
+        depthRay,
+        maxQueryDepth,
+        sceneTimeSeconds,
+        waterGeomId,
+        -1,
+        geoms,
+        meshInstances,
+        scenePrimitives,
+        sceneBvhNodes,
+        sceneBvhNodeCount,
+        triangles,
+        triangleBvhNodes,
+        triangleBvhNodeCount,
+        hit))
+    {
+        return maxQueryDepth;
+    }
+
+    return glm::clamp(hit.t, 0.0f, maxQueryDepth);
+}
+
+__device__ inline float evaluateShorelineFoamBreakup(
+    const Geom& waterGeom,
+    const glm::vec3& worldSurfacePoint,
+    float sceneTimeSeconds)
+{
+    const glm::vec3 localSurfacePoint = waterMultiplyMV(
+        waterGeom.inverseTransform,
+        glm::vec4(worldSurfacePoint, 1.0f));
+    const glm::vec2 baseXZ(localSurfacePoint.x, localSurfacePoint.z);
+    const float large = waterFbm(baseXZ * 0.75f + glm::vec2(sceneTimeSeconds * 0.09f, -sceneTimeSeconds * 0.05f));
+    const float medium = waterFbm(baseXZ * 1.90f + glm::vec2(-sceneTimeSeconds * 0.18f, sceneTimeSeconds * 0.13f));
+    const float patch = waterSmoothstep(0.52f, 0.84f, large);
+    const float detail = waterSmoothstep(0.45f, 0.82f, medium);
+    return glm::clamp(patch * detail, 0.0f, 1.0f);
+}
+
+__device__ inline float queryWaterSceneLateralContact(
+    float sceneTimeSeconds,
+    const glm::vec3& surfacePoint,
+    int waterGeomId,
+    const Geom* geoms,
+    const MeshInstance* meshInstances,
+    const ScenePrimitive* scenePrimitives,
+    const SceneBvhNode* sceneBvhNodes,
+    int sceneBvhNodeCount,
+    const Triangle* triangles,
+    const TriangleBvhNode* triangleBvhNodes,
+    int triangleBvhNodeCount,
+    float maxQueryDistance)
+{
+    if (maxQueryDistance <= EPSILON)
+    {
+        return 0.0f;
+    }
+
+    const glm::vec3 probeDirections[] = {
+        glm::vec3(1.0f, -0.12f, 0.0f),
+        glm::vec3(-1.0f, -0.12f, 0.0f),
+        glm::vec3(0.0f, -0.12f, 1.0f),
+        glm::vec3(0.0f, -0.12f, -1.0f),
+        glm::vec3(1.0f, -0.12f, 1.0f),
+        glm::vec3(-1.0f, -0.12f, 1.0f),
+        glm::vec3(1.0f, -0.12f, -1.0f),
+        glm::vec3(-1.0f, -0.12f, -1.0f)
+    };
+
+    float bestContact = 0.0f;
+    for (const glm::vec3& directionSeed : probeDirections)
+    {
+        Ray probeRay;
+        probeRay.direction = glm::normalize(directionSeed);
+        probeRay.origin = offsetRayOriginAlongDirection(
+            surfacePoint + glm::vec3(0.0f, 0.02f, 0.0f),
+            probeRay.direction,
+            2.0f);
+
+        TraceHit hit{};
+        if (!traceSceneClosest(
+            probeRay,
+            maxQueryDistance,
+            sceneTimeSeconds,
+            waterGeomId,
+            -1,
+            geoms,
+            meshInstances,
+            scenePrimitives,
+            sceneBvhNodes,
+            sceneBvhNodeCount,
+            triangles,
+            triangleBvhNodes,
+            triangleBvhNodeCount,
+            hit))
+        {
+            continue;
+        }
+
+        const float contact = 1.0f - glm::clamp(hit.t / maxQueryDistance, 0.0f, 1.0f);
+        bestContact = glm::max(bestContact, contact);
+    }
+
+    return bestContact;
+}
+
+__device__ inline void applyWaterShallowTintToMaterial(
+    const Geom& waterGeom,
+    float shallowFactor,
+    Material& shadingMaterial)
+{
+    const float tintFactor = glm::clamp(shallowFactor, 0.0f, 1.0f) * waterGeom.water.shallowColorStrength;
+    if (tintFactor <= EPSILON)
+    {
+        return;
+    }
+
+    shadingMaterial.color = glm::mix(shadingMaterial.color, waterGeom.water.shallowColor, tintFactor);
+    shadingMaterial.roughness = glm::mix(shadingMaterial.roughness, 0.04f, tintFactor * 0.35f);
+}
+
 __host__ __device__ inline float luminance(const glm::vec3& color)
 {
     return 0.2126f * color.r + 0.7152f * color.g + 0.0722f * color.b;
@@ -1732,6 +1963,10 @@ __host__ __device__ inline float geomEmissiveArea(const Geom& geom, const Materi
     {
         const float radius = 0.5f * glm::max(geom.scale.x, glm::max(geom.scale.y, geom.scale.z));
         return 4.0f * PI * radius * radius;
+    }
+    if (geom.type == WATER_PLANE)
+    {
+        return 0.0f;
     }
 
     const float sx = geom.scale.x;
@@ -1878,6 +2113,7 @@ __device__ int sampleLightIndex(
 __device__ glm::vec3 computeShadowTransmittance(
     const Ray& shadowRay,
     float maxDistance,
+    float sceneTimeSeconds,
     int ignoreGeomId,
     int initialIgnoreTriangleIndex,
     const Geom* geoms,
@@ -1903,6 +2139,7 @@ __device__ glm::vec3 computeShadowTransmittance(
         if (!traceSceneClosest(
             currentRay,
             remainingDistance,
+            sceneTimeSeconds,
             ignoreGeomId,
             ignoreTriangleIndex,
             geoms,
@@ -1958,6 +2195,63 @@ __device__ glm::vec3 computeShadowTransmittance(
     }
 
     return remainingDistance > MIN_INTERSECTION_T ? transmittance : glm::vec3(1.0f);
+}
+
+__device__ inline glm::vec3 computeWaterAbsorptionTransmittance(
+    const Geom& waterGeom,
+    float sceneTimeSeconds,
+    const glm::vec3& surfacePoint,
+    const glm::vec3& surfaceNormal,
+    const glm::vec3& direction,
+    int waterGeomId,
+    const Geom* geoms,
+    const MeshInstance* meshInstances,
+    const ScenePrimitive* scenePrimitives,
+    const SceneBvhNode* sceneBvhNodes,
+    int sceneBvhNodeCount,
+    const Triangle* triangles,
+    const TriangleBvhNode* triangleBvhNodes,
+    int triangleBvhNodeCount)
+{
+    const glm::vec3 absorptionCoeff = glm::max(waterGeom.water.absorptionCoefficient, glm::vec3(0.0f));
+    if (glm::length2(absorptionCoeff) <= 0.0f)
+    {
+        return glm::vec3(1.0f);
+    }
+    if (glm::dot(direction, surfaceNormal) >= 0.0f)
+    {
+        return glm::vec3(1.0f);
+    }
+
+    Ray mediumRay{};
+    mediumRay.origin = offsetRayOrigin(surfacePoint, -surfaceNormal, direction);
+    mediumRay.direction = direction;
+
+    float distance = glm::max(waterGeom.water.fallbackAbsorptionDistance, 0.0f);
+    TraceHit mediumHit{};
+    if (traceSceneClosest(
+            mediumRay,
+            FLT_MAX,
+            sceneTimeSeconds,
+            waterGeomId,
+            -1,
+            geoms,
+            meshInstances,
+            scenePrimitives,
+            sceneBvhNodes,
+            sceneBvhNodeCount,
+            triangles,
+            triangleBvhNodes,
+            triangleBvhNodeCount,
+            mediumHit))
+    {
+        distance = mediumHit.t;
+    }
+
+    return glm::vec3(
+        expf(-absorptionCoeff.r * distance),
+        expf(-absorptionCoeff.g * distance),
+        expf(-absorptionCoeff.b * distance));
 }
 
 __device__ bool applyRussianRoulette(
@@ -2073,6 +2367,7 @@ __device__ inline void orientSurfaceForShading(
 
 __device__ inline void sampleDirectAnalyticLights(
     thrust::default_random_engine& rng,
+    float sceneTimeSeconds,
     const PathSegment& pathSegment,
     const ShadeableIntersection& intersection,
     const Material& material,
@@ -2155,6 +2450,7 @@ __device__ inline void sampleDirectAnalyticLights(
     const glm::vec3 shadowTransmittance = computeShadowTransmittance(
         shadowRay,
         dist,
+        sceneTimeSeconds,
         lightGeomIdx,
         intersection.triangleIndex,
         geoms,
@@ -2197,6 +2493,7 @@ __device__ inline void sampleDirectAnalyticLights(
 
 __device__ inline void sampleDirectEnvironmentLightContribution(
     thrust::default_random_engine& rng,
+    float sceneTimeSeconds,
     const PathSegment& pathSegment,
     const ShadeableIntersection& intersection,
     const Material& material,
@@ -2269,6 +2566,7 @@ __device__ inline void sampleDirectEnvironmentLightContribution(
     const glm::vec3 shadowTransmittance = computeShadowTransmittance(
         shadowRay,
         FLT_MAX,
+        sceneTimeSeconds,
         -1,
         intersection.triangleIndex,
         geoms,
@@ -2304,6 +2602,8 @@ __global__ void shadeMaterialPaths(
     int iter,
     int num_paths,
     int traceDepth,
+    float sceneTimeSeconds,
+    float frameDeltaTimeSeconds,
     const ShadeableIntersection* shadeableIntersections,
     PathSegment* pathSegments,
     const Material* materials,
@@ -2332,6 +2632,8 @@ __global__ void shadeMaterialPaths(
     int renderDebugMode,
     glm::vec3* image)
 {
+    (void)sceneTimeSeconds;
+    (void)frameDeltaTimeSeconds;
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < num_paths){
         ShadeableIntersection intersection = shadeableIntersections[idx];
@@ -2372,6 +2674,16 @@ __global__ void shadeMaterialPaths(
             Material shadingMaterial = evaluateShadingMaterial(material, intersection, textures, texturePixels, baseColorSamplePtr);
             intersection.surfaceNormal = evaluateShadingNormal(material, intersection, textures, texturePixels);
             pathSegment.ignoreTriangleIndex = -1;
+
+            if (renderDebugMode == RENDER_DEBUG_WATER_SURFACE
+                && intersection.geomId >= 0
+                && geoms[intersection.geomId].type == WATER_PLANE)
+            {
+                pathSegment.color *= evaluateWaterDebugColor(intersection);
+                image[pathSegment.pixelIndex] += pathSegment.color;
+                pathSegment.remainingBounces = 0;
+                return;
+            }
 
             if (renderDebugMode != RENDER_DEBUG_NONE && intersection.geomId < 0)
             {
@@ -2418,6 +2730,79 @@ __global__ void shadeMaterialPaths(
             }
             else {
                 const glm::vec3 intersect = pathSegment.ray.origin + intersection.t * pathSegment.ray.direction;
+                if (intersection.geomId >= 0 && geoms[intersection.geomId].type == WATER_PLANE)
+                {
+                    const Geom& waterGeom = geoms[intersection.geomId];
+                    const float maxShallowQueryDepth = glm::max(
+                        waterGeom.water.shallowColorDistance,
+                        waterGeom.water.shorelineFoamDistance);
+                    float shallowDepth = maxShallowQueryDepth;
+                    if (maxShallowQueryDepth > EPSILON)
+                    {
+                        shallowDepth = queryWaterSceneDepthBelowSurface(
+                            waterGeom,
+                            sceneTimeSeconds,
+                            intersect,
+                            intersection.geomId,
+                            geoms,
+                            meshInstances,
+                            scenePrimitives,
+                            sceneBvhNodes,
+                            sceneBvhNodeCount,
+                            triangles,
+                            triangleBvhNodes,
+                            triangleBvhNodeCount,
+                            maxShallowQueryDepth);
+                    }
+
+                    const float lateralContact = queryWaterSceneLateralContact(
+                        sceneTimeSeconds,
+                        intersect,
+                        intersection.geomId,
+                        geoms,
+                        meshInstances,
+                        scenePrimitives,
+                        sceneBvhNodes,
+                        sceneBvhNodeCount,
+                        triangles,
+                        triangleBvhNodes,
+                        triangleBvhNodeCount,
+                        glm::max(
+                            waterGeom.water.shallowColorDistance,
+                            waterGeom.water.shorelineFoamDistance));
+
+                    const float shallowFactor = waterGeom.water.shallowColorDistance > EPSILON
+                        ? (1.0f - glm::clamp(shallowDepth / waterGeom.water.shallowColorDistance, 0.0f, 1.0f))
+                        : 0.0f;
+                    applyWaterShallowTintToMaterial(
+                        waterGeom,
+                        glm::max(shallowFactor, lateralContact * 0.65f),
+                        shadingMaterial);
+
+                    float foamMask = evaluateWaterFoamMask(
+                        waterGeom,
+                        intersect,
+                        sceneTimeSeconds);
+                    const float shorelineFoamFactor = waterGeom.water.shorelineFoamDistance > EPSILON
+                        ? (1.0f - glm::clamp(shallowDepth / waterGeom.water.shorelineFoamDistance, 0.0f, 1.0f))
+                        : 0.0f;
+                    const float shorelineFoam = waterGeom.water.shorelineFoamIntensity
+                        * glm::max(
+                            shorelineFoamFactor * shorelineFoamFactor,
+                            lateralContact * lateralContact)
+                        * evaluateShorelineFoamBreakup(waterGeom, intersect, sceneTimeSeconds);
+                    foamMask = glm::max(foamMask, shorelineFoam);
+                    if (glm::dot(pathSegment.ray.direction, intersection.geometricNormal) > 0.0f)
+                    {
+                        foamMask *= 0.2f;
+                    }
+                    applyWaterFoamToMaterial(
+                        waterGeom,
+                        foamMask,
+                        shadingMaterial);
+                }
+
+                const glm::vec3 boundaryNormal = intersection.geometricNormal;
                 glm::vec3 geometricNormal = intersection.geometricNormal;
                 glm::vec3 shadingNormal = intersection.surfaceNormal;
                 const glm::vec3 wo = -glm::normalize(pathSegment.ray.direction);
@@ -2427,6 +2812,7 @@ __global__ void shadeMaterialPaths(
                 if (useDirectLightSampling) {
                     sampleDirectAnalyticLights(
                         rng,
+                        sceneTimeSeconds,
                         pathSegment,
                         intersection,
                         material,
@@ -2453,6 +2839,7 @@ __global__ void shadeMaterialPaths(
 
                     sampleDirectEnvironmentLightContribution(
                         rng,
+                        sceneTimeSeconds,
                         pathSegment,
                         intersection,
                         material,
@@ -2498,6 +2885,26 @@ __global__ void shadeMaterialPaths(
                 }
 
                 pathSegment.color *= sample.pathWeight;
+                if (intersection.geomId >= 0
+                    && geoms[intersection.geomId].type == WATER_PLANE
+                    && sample.sampledTransmission)
+                {
+                    pathSegment.color *= computeWaterAbsorptionTransmittance(
+                        geoms[intersection.geomId],
+                        sceneTimeSeconds,
+                        intersect,
+                        boundaryNormal,
+                        sample.direction,
+                        intersection.geomId,
+                        geoms,
+                        meshInstances,
+                        scenePrimitives,
+                        sceneBvhNodes,
+                        sceneBvhNodeCount,
+                        triangles,
+                        triangleBvhNodes,
+                        triangleBvhNodeCount);
+                }
                 if (enableFireflyMitigation)
                 {
                     pathSegment.color = clampLuminance(
@@ -2563,6 +2970,8 @@ void pathtrace(uchar4* pbo, int frame, int iter)
     const int pixelcount = cam.resolution.x * cam.resolution.y;
     const int sceneBvhNodeCount = static_cast<int>(hst_scene->sceneBvhNodes.size());
     const int triangleBvhNodeCount = static_cast<int>(hst_scene->triangleBvhNodes.size());
+    const float sceneTimeSeconds = hst_scene->state.sceneTimeSeconds;
+    const float frameDeltaTimeSeconds = hst_scene->state.frameDeltaTimeSeconds;
 
     // 2D block for generating ray from camera
     const dim3 blockSize2d(RENDER_CONFIG_CAMERA_BLOCK_SIZE_X, RENDER_CONFIG_CAMERA_BLOCK_SIZE_Y);
@@ -2630,6 +3039,8 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             dev_triangles,
             dev_triangleBvhNodes,
             triangleBvhNodeCount,
+            sceneTimeSeconds,
+            frameDeltaTimeSeconds,
             dev_intersections
         );
         checkCUDAError("trace one bounce");
@@ -2698,6 +3109,8 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             iter,
             num_paths,
             traceDepth,
+            sceneTimeSeconds,
+            frameDeltaTimeSeconds,
             dev_intersections,
             dev_paths,
             dev_materials,
@@ -2789,22 +3202,4 @@ void pathtrace(uchar4* pbo, int frame, int iter)
 
     checkCUDAError("pathtrace");
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 

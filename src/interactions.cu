@@ -570,6 +570,7 @@ __host__ __device__ void scatterRay(
     BSDFSample& sample)
 {
     thrust::uniform_real_distribution<float> u01(0, 1);
+    sample.sampledTransmission = 0;
 
     glm::vec3 wi = glm::normalize(ray.direction);
     const bool frontFace = glm::dot(wi, geometricNormal) < 0.0f;
@@ -675,9 +676,10 @@ __host__ __device__ void scatterRay(
         if (m.thinWalled && transmissionStrength > 0.0f)
         {
             sample.direction = wi;
-            sample.pathWeight = safeDivide(glm::vec3(transmissionStrength), pRefract);
+            sample.pathWeight = safeDivide(m.color * transmissionStrength, pRefract);
             sample.pdf = 0.0f;
             sample.isDelta = 1;
+            sample.sampledTransmission = 1;
             return;
         }
 
@@ -782,6 +784,7 @@ __host__ __device__ void scatterRay(
                         enableFireflyMitigation,
                         maxNonDeltaSampleLuminance);
                     sample.isDelta = 0;
+                    sample.sampledTransmission = 1;
                     return;
                 }
             }
@@ -796,9 +799,10 @@ __host__ __device__ void scatterRay(
         }
 
         sample.direction = glm::normalize(outDir);
-        sample.pathWeight = safeDivide(glm::vec3(transmissionStrength), pRefract);
+        sample.pathWeight = safeDivide(m.color * transmissionStrength, pRefract);
         sample.pdf = 0.0f;
         sample.isDelta = 1;
+        sample.sampledTransmission = 1;
         return;
     }
 

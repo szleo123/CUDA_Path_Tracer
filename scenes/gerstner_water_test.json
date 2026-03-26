@@ -1,0 +1,132 @@
+{
+    "Environment": {
+        "TYPE": "ProceduralSky",
+        "INTENSITY": 1.0,
+        "ROTATION": 0.0,
+        "SKY_ZENITH": [0.42, 0.66, 0.98],
+        "SKY_HORIZON": [0.92, 0.96, 1.0],
+        "GROUND_COLOR": [0.18, 0.18, 0.20]
+    },
+    "Animation": {
+        "TIME": 0.0,
+        "STEP_DT": 0.0166667,
+        "SPEED": 1.0,
+        "PLAY": false
+    },
+    "Materials": {
+        "water_surface": {
+            "TYPE": "Glass",
+            "RGB": [0.80, 0.92, 0.98],
+            "ROUGHNESS": 0.10,
+            "IOR": 1.333,
+            "REFLECTIVITY": 0.18
+        },
+        "sand": {
+            "TYPE": "Diffuse",
+            "RGB": [0.74, 0.69, 0.55],
+            "ROUGHNESS": 0.99
+        },
+        "underwater_blue": {
+            "TYPE": "Diffuse",
+            "RGB": [0.18, 0.34, 0.44],
+            "ROUGHNESS": 0.98
+        },
+        "white_diffuse": {
+            "TYPE": "Diffuse",
+            "RGB": [0.78, 0.80, 0.84],
+            "ROUGHNESS": 0.95
+        },
+        "orange_diffuse": {
+            "TYPE": "Diffuse",
+            "RGB": [0.86, 0.48, 0.20],
+            "ROUGHNESS": 0.85
+        },
+        "mirror": {
+            "TYPE": "Specular",
+            "RGB": [0.92, 0.92, 0.92],
+            "ROUGHNESS": 0.02,
+            "METALLIC": 1.0
+        }
+    },
+    "Camera": {
+        "RES": [800, 800],
+        "FOVY": 40.0,
+        "ITERATIONS": 5000,
+        "DEPTH": 12,
+        "FILE": "gerstner_water_test",
+        "EYE": [0.0, 0.82, 8.2],
+        "LOOKAT": [0.0, 0.08, 0.0],
+        "UP": [0.0, 1.0, 0.0]
+    },
+    "Objects": [
+        {
+            "NAME": "Water Surface",
+            "TYPE": "water",
+            "MATERIAL": "water_surface",
+            "TRANS": [0.0, 0.0, 0.0],
+            "ROTAT": [0.0, 0.0, 0.0],
+            "SCALE": [14.0, 1.0, 14.0],
+            "WATER": {
+                "INFINITE": true,
+                "UV_SCALE": [10.0, 10.0],
+                "ABSORPTION_COEFF": [0.26, 0.09, 0.03],
+                "FALLBACK_ABSORPTION_DISTANCE": 12.0,
+                "FOAM_COLOR": [0.94, 0.97, 1.0],
+                "FOAM_INTENSITY": 0.22,
+                "FOAM_THRESHOLD": 0.68,
+                "FOAM_SOFTNESS": 0.12,
+                "FOAM_ROUGHNESS": 0.55,
+                "WAVES": [
+                    { "DIR": [1.0, 0.16], "AMPLITUDE": 0.165, "WAVELENGTH": 2.80, "SPEED": 0.60, "STEEPNESS": 0.34 },
+                    { "DIR": [0.86, 0.34], "AMPLITUDE": 0.095, "WAVELENGTH": 1.70, "SPEED": 0.84, "STEEPNESS": 0.30 },
+                    { "DIR": [-0.18, 1.0], "AMPLITUDE": 0.055, "WAVELENGTH": 0.98, "SPEED": 1.35, "STEEPNESS": 0.46 },
+                    { "DIR": [0.42, 1.0], "AMPLITUDE": 0.042, "WAVELENGTH": 0.72, "SPEED": 1.78, "STEEPNESS": 0.48 },
+                    { "DIR": [-0.82, 0.28], "AMPLITUDE": 0.030, "WAVELENGTH": 0.53, "SPEED": 2.12, "STEEPNESS": 0.40 },
+                    { "DIR": [1.0, -0.52], "AMPLITUDE": 0.016, "WAVELENGTH": 0.24, "SPEED": 3.05, "STEEPNESS": 0.52 },
+                    { "DIR": [-0.60, -1.0], "AMPLITUDE": 0.012, "WAVELENGTH": 0.17, "SPEED": 3.80, "STEEPNESS": 0.54 },
+                    { "DIR": [0.22, -1.0], "AMPLITUDE": 0.009, "WAVELENGTH": 0.12, "SPEED": 4.50, "STEEPNESS": 0.50 }
+                ]
+            }
+        },
+        {
+            "NAME": "Seafloor",
+            "TYPE": "cube",
+            "MATERIAL": "sand",
+            "TRANS": [0.0, -8.0, 0.0],
+            "ROTAT": [0.0, 0.0, 0.0],
+            "SCALE": [4000.0, 0.35, 4000.0]
+        },
+        {
+            "NAME": "Floating Sphere",
+            "TYPE": "sphere",
+            "MATERIAL": "mirror",
+            "TRANS": [-1.1, 0.65, 0.0],
+            "ROTAT": [0.0, 0.0, 0.0],
+            "SCALE": [0.9, 0.9, 0.9]
+        },
+        {
+            "NAME": "Marker Cube",
+            "TYPE": "cube",
+            "MATERIAL": "orange_diffuse",
+            "TRANS": [1.2, -0.35, -0.9],
+            "ROTAT": [0.0, 28.0, 0.0],
+            "SCALE": [0.7, 0.35, 0.7]
+        },
+        {
+            "NAME": "Submerged Block",
+            "TYPE": "cube",
+            "MATERIAL": "white_diffuse",
+            "TRANS": [-2.2, -0.55, -1.6],
+            "ROTAT": [0.0, 18.0, 0.0],
+            "SCALE": [1.1, 0.55, 1.1]
+        },
+        {
+            "NAME": "Crossing Column",
+            "TYPE": "cube",
+            "MATERIAL": "orange_diffuse",
+            "TRANS": [0.15, 0.0, -1.85],
+            "ROTAT": [0.0, 0.0, 0.0],
+            "SCALE": [0.35, 2.0, 0.35]
+        }
+    ]
+}

@@ -11,6 +11,7 @@ enum class SceneObjectType
 {
     Sphere,
     Cube,
+    Water,
     Mesh
 };
 
@@ -23,6 +24,7 @@ struct SceneObject
     glm::vec3 translation;
     glm::vec3 rotation;
     glm::vec3 scale;
+    Geom::WaterSettings water;
     std::string meshPath;
     std::vector<Triangle> localTriangles;
     std::vector<TriangleBvhNode> localBvhNodes;
@@ -50,6 +52,9 @@ public:
     void updateMaterial(
         size_t materialIndex,
         const Material& material);
+    void updateWaterSettings(
+        size_t objectIndex,
+        const Geom::WaterSettings& water);
     bool updateEnvironment(
         const EnvironmentSettings& environment,
         const std::string& hdrPath,

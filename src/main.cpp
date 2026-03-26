@@ -88,6 +88,7 @@ static bool objectManipulationActive = false;
 static bool cudaSceneInitialized = false;
 static char environmentFilePathBuffer[1024] = {};
 static std::string environmentUiMessage;
+static double lastSceneTimeWallClockSeconds = 0.0;
 static double manipulationStartX = 0.0;
 static double manipulationStartY = 0.0;
 static glm::vec3 manipulationStartTranslation(0.0f);
@@ -110,8 +111,14 @@ namespace
 {
 void applyObjectTransform(int objectIndex, const glm::vec3& translation, const glm::vec3& rotation, const glm::vec3& scale);
 void applyMaterialProperties(int materialId, const Material& material);
+void applyWaterSettings(int objectIndex, const Geom::WaterSettings& water);
 void syncEnvironmentUiFromScene();
 void applyEnvironmentSettings(const EnvironmentSettings& environment, const std::string& hdrPath);
+void resetSceneTimePlaybackClock();
+void setSceneTimeSeconds(float sceneTimeSeconds, float frameDeltaTimeSeconds);
+void stepSceneTimeSeconds(float frameDeltaTimeSeconds);
+void updateSceneTimePlayback();
+void syncCameraState();
 
 bool isInspectorVisible()
 {
@@ -224,6 +231,76 @@ const char* getMaterialDisplayName(int materialId)
 bool hasNonZeroColor(const glm::vec3& color)
 {
     return glm::dot(color, color) > 1.0e-8f;
+}
+
+void resetSceneTimePlaybackClock()
+{
+    if (window != nullptr)
+    {
+        lastSceneTimeWallClockSeconds = glfwGetTime();
+    }
+}
+
+void setSceneTimeSeconds(float sceneTimeSeconds, float frameDeltaTimeSeconds)
+{
+    if (renderState == nullptr)
+    {
+        return;
+    }
+
+    if (fabsf(renderState->sceneTimeSeconds - sceneTimeSeconds) > EPSILON)
+    {
+        iteration = 0;
+    }
+
+    renderState->sceneTimeSeconds = sceneTimeSeconds;
+    renderState->frameDeltaTimeSeconds = frameDeltaTimeSeconds;
+}
+
+void stepSceneTimeSeconds(float frameDeltaTimeSeconds)
+{
+    if (renderState == nullptr)
+    {
+        return;
+    }
+
+    renderState->sceneTimeSeconds += frameDeltaTimeSeconds;
+    renderState->frameDeltaTimeSeconds = frameDeltaTimeSeconds;
+    if (fabsf(frameDeltaTimeSeconds) > EPSILON)
+    {
+        iteration = 0;
+    }
+}
+
+void updateSceneTimePlayback()
+{
+    if (renderState == nullptr || window == nullptr)
+    {
+        return;
+    }
+
+    const double now = glfwGetTime();
+    if (lastSceneTimeWallClockSeconds <= 0.0)
+    {
+        lastSceneTimeWallClockSeconds = now;
+    }
+
+    const float wallClockDelta = glm::max(static_cast<float>(now - lastSceneTimeWallClockSeconds), 0.0f);
+    lastSceneTimeWallClockSeconds = now;
+
+    if (renderState->playAnimation == 0)
+    {
+        renderState->frameDeltaTimeSeconds = 0.0f;
+        return;
+    }
+
+    const float sceneDeltaTime = wallClockDelta * glm::max(renderState->playbackSpeed, 0.0f);
+    renderState->frameDeltaTimeSeconds = sceneDeltaTime;
+    if (fabsf(sceneDeltaTime) > EPSILON)
+    {
+        renderState->sceneTimeSeconds += sceneDeltaTime;
+        iteration = 0;
+    }
 }
 
 void syncEnvironmentUiFromScene()
@@ -376,12 +453,103 @@ bool editMaterialControls(Material& material)
     return changed;
 }
 
+bool editWaterControls(Geom::WaterSettings& water)
+{
+    bool changed = false;
+
+    bool infinitePlane = water.infinitePlane != 0;
+    if (ImGui::Checkbox("Infinite Water Plane", &infinitePlane))
+    {
+        water.infinitePlane = infinitePlane ? 1 : 0;
+        changed = true;
+    }
+    changed |= ImGui::DragFloat2("Water UV Scale", &water.uvScale[0], 0.05f, 0.01f, 64.0f, "%.3f");
+    changed |= ImGui::ColorEdit3("Absorption Coeff", &water.absorptionCoefficient[0]);
+    changed |= ImGui::DragFloat(
+        "Fallback Absorption Distance",
+        &water.fallbackAbsorptionDistance,
+        0.05f,
+        0.0f,
+        100.0f,
+        "%.3f");
+    ImGui::Separator();
+    ImGui::TextUnformatted("Foam");
+    changed |= ImGui::ColorEdit3("Foam Color", &water.foamColor[0]);
+    changed |= ImGui::SliderFloat("Foam Intensity", &water.foamIntensity, 0.0f, 2.0f);
+    changed |= ImGui::SliderFloat("Foam Threshold", &water.foamThreshold, 0.0f, 2.0f);
+    changed |= ImGui::SliderFloat("Foam Softness", &water.foamSoftness, 0.01f, 1.0f);
+    changed |= ImGui::SliderFloat("Foam Roughness", &water.foamRoughness, 0.0f, 1.0f);
+    ImGui::Separator();
+    ImGui::TextUnformatted("Shallow Water");
+    changed |= ImGui::ColorEdit3("Shallow Color", &water.shallowColor[0]);
+    changed |= ImGui::SliderFloat("Shallow Distance", &water.shallowColorDistance, 0.0f, 10.0f);
+    changed |= ImGui::SliderFloat("Shallow Strength", &water.shallowColorStrength, 0.0f, 1.0f);
+    changed |= ImGui::SliderFloat("Shore Foam Distance", &water.shorelineFoamDistance, 0.0f, 5.0f);
+    changed |= ImGui::SliderFloat("Shore Foam Intensity", &water.shorelineFoamIntensity, 0.0f, 4.0f);
+
+    int waveCount = glm::clamp(water.waveCount, 0, RENDER_CONFIG_MAX_GERSTNER_WAVES);
+    if (ImGui::SliderInt("Wave Count", &waveCount, 0, RENDER_CONFIG_MAX_GERSTNER_WAVES))
+    {
+        water.waveCount = waveCount;
+        changed = true;
+    }
+
+    for (int waveIndex = 0; waveIndex < waveCount; ++waveIndex)
+    {
+        Geom::WaterSettings::Wave& wave = water.waves[waveIndex];
+        const std::string header = "Wave " + std::to_string(waveIndex + 1);
+        if (!ImGui::CollapsingHeader(header.c_str(), ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            continue;
+        }
+
+        changed |= ImGui::DragFloat2(("Direction##water_dir_" + std::to_string(waveIndex)).c_str(), &wave.direction[0], 0.01f, -1.0f, 1.0f, "%.3f");
+        changed |= ImGui::DragFloat(("Amplitude##water_amp_" + std::to_string(waveIndex)).c_str(), &wave.amplitude, 0.001f, 0.0f, 1.0f, "%.4f");
+        changed |= ImGui::DragFloat(("Wavelength##water_lambda_" + std::to_string(waveIndex)).c_str(), &wave.wavelength, 0.005f, 0.01f, 10.0f, "%.4f");
+        changed |= ImGui::DragFloat(("Speed##water_speed_" + std::to_string(waveIndex)).c_str(), &wave.speed, 0.01f, -20.0f, 20.0f, "%.3f");
+        changed |= ImGui::SliderFloat(("Steepness##water_steep_" + std::to_string(waveIndex)).c_str(), &wave.steepness, 0.0f, 1.5f, "%.3f");
+    }
+
+    if (changed)
+    {
+        water.uvScale = glm::max(water.uvScale, glm::vec2(0.01f));
+        water.absorptionCoefficient = glm::max(water.absorptionCoefficient, glm::vec3(0.0f));
+        water.foamColor = glm::clamp(water.foamColor, glm::vec3(0.0f), glm::vec3(1.0f));
+        water.shallowColor = glm::clamp(water.shallowColor, glm::vec3(0.0f), glm::vec3(1.0f));
+        water.fallbackAbsorptionDistance = glm::max(water.fallbackAbsorptionDistance, 0.0f);
+        water.foamIntensity = glm::max(water.foamIntensity, 0.0f);
+        water.foamThreshold = glm::clamp(water.foamThreshold, 0.0f, 2.0f);
+        water.foamSoftness = glm::max(water.foamSoftness, 0.001f);
+        water.foamRoughness = glm::clamp(water.foamRoughness, 0.0f, 1.0f);
+        water.shallowColorDistance = glm::max(water.shallowColorDistance, 0.0f);
+        water.shallowColorStrength = glm::clamp(water.shallowColorStrength, 0.0f, 1.0f);
+        water.shorelineFoamDistance = glm::max(water.shorelineFoamDistance, 0.0f);
+        water.shorelineFoamIntensity = glm::max(water.shorelineFoamIntensity, 0.0f);
+        water.waveCount = glm::clamp(water.waveCount, 0, RENDER_CONFIG_MAX_GERSTNER_WAVES);
+        for (int waveIndex = 0; waveIndex < water.waveCount; ++waveIndex)
+        {
+            Geom::WaterSettings::Wave& wave = water.waves[waveIndex];
+            wave.amplitude = glm::max(wave.amplitude, 0.0f);
+            wave.wavelength = glm::max(wave.wavelength, 0.01f);
+            wave.steepness = glm::clamp(wave.steepness, 0.0f, 1.5f);
+        }
+        water.maxVerticalDisplacement = computeWaterMaxVerticalDisplacement(water);
+    }
+
+    return changed;
+}
+
 void computeObjectLocalBounds(const SceneObject& object, glm::vec3& outMin, glm::vec3& outMax)
 {
     if (object.type == SceneObjectType::Mesh && object.triangleCount > 0)
     {
         outMin = object.localBboxMin;
         outMax = object.localBboxMax;
+        return;
+    }
+    if (object.type == SceneObjectType::Water)
+    {
+        getWaterLocalBounds(object.water, outMin, outMax);
         return;
     }
 
@@ -473,6 +641,8 @@ const char* getRenderDebugModeLabel(int mode)
         return "Mesh Base Color";
     case RENDER_DEBUG_MESH_TEXTURE_ONLY:
         return "Mesh Texture Only";
+    case RENDER_DEBUG_WATER_SURFACE:
+        return "Water Surface";
     default:
         return "None";
     }
@@ -552,6 +722,9 @@ void renderMainMenuBar()
 
 void renderAnalyticsSection()
 {
+    syncCameraState();
+    const Camera& camera = renderState->camera;
+
     if (ImGui::Checkbox("Sort by Material", &imguiData->UseMaterialSort))
     {
         iteration = 0;
@@ -566,6 +739,56 @@ void renderAnalyticsSection()
     {
         iteration = 0;
     }
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("Camera");
+    ImGui::Text("Eye    [%.3f, %.3f, %.3f]", camera.position.x, camera.position.y, camera.position.z);
+    ImGui::Text("LookAt [%.3f, %.3f, %.3f]", camera.lookAt.x, camera.lookAt.y, camera.lookAt.z);
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("Animation");
+    bool playAnimation = renderState->playAnimation != 0;
+    if (ImGui::Checkbox("Play Scene Time", &playAnimation))
+    {
+        renderState->playAnimation = playAnimation ? 1 : 0;
+        renderState->frameDeltaTimeSeconds = 0.0f;
+        resetSceneTimePlaybackClock();
+        iteration = 0;
+    }
+
+    float sceneTimeSeconds = renderState->sceneTimeSeconds;
+    if (ImGui::DragFloat("Scene Time", &sceneTimeSeconds, 0.01f, 0.0f, 0.0f, "%.3f s"))
+    {
+        setSceneTimeSeconds(sceneTimeSeconds, 0.0f);
+        resetSceneTimePlaybackClock();
+    }
+
+    float stepDeltaTimeSeconds = renderState->stepDeltaTimeSeconds;
+    if (ImGui::DragFloat("Step Dt", &stepDeltaTimeSeconds, 0.001f, 0.0f, 1.0f, "%.4f s"))
+    {
+        renderState->stepDeltaTimeSeconds = glm::max(stepDeltaTimeSeconds, 0.0f);
+    }
+
+    float playbackSpeed = renderState->playbackSpeed;
+    if (ImGui::SliderFloat("Playback Speed", &playbackSpeed, 0.0f, 4.0f, "%.2fx"))
+    {
+        renderState->playbackSpeed = glm::max(playbackSpeed, 0.0f);
+        resetSceneTimePlaybackClock();
+    }
+
+    if (ImGui::Button("Reset Time"))
+    {
+        setSceneTimeSeconds(0.0f, 0.0f);
+        resetSceneTimePlaybackClock();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Step Frame"))
+    {
+        stepSceneTimeSeconds(renderState->stepDeltaTimeSeconds);
+        resetSceneTimePlaybackClock();
+    }
+
+    ImGui::Text("Frame Dt %.4f s", renderState->frameDeltaTimeSeconds);
 
     ImGui::Separator();
     ImGui::TextUnformatted("Firefly Mitigation");
@@ -647,7 +870,7 @@ void renderAnalyticsSection()
         ImGui::TextWrapped("%s", environmentUiMessage.c_str());
     }
 
-    const char* renderDebugLabels[] = { "None", "Mesh UV Checker", "Mesh Base Color", "Mesh Texture Only" };
+    const char* renderDebugLabels[] = { "None", "Mesh UV Checker", "Mesh Base Color", "Mesh Texture Only", "Water Surface" };
     if (ImGui::Combo("Render Debug", &imguiData->RenderDebugModeValue, renderDebugLabels, IM_ARRAYSIZE(renderDebugLabels)))
     {
         iteration = 0;
@@ -657,6 +880,8 @@ void renderAnalyticsSection()
 
     ImGui::Text("Tone Mapping %s", getToneMapModeLabel(imguiData->ToneMapModeValue));
     ImGui::Text("Exposure %.2f EV", imguiData->ExposureValue);
+    ImGui::Text("Scene Time %.3f s", renderState->sceneTimeSeconds);
+    ImGui::Text("Playback %s @ %.2fx", renderState->playAnimation ? "On" : "Off", renderState->playbackSpeed);
     ImGui::Text("Firefly Mitigation %s", imguiData->EnableFireflyMitigation ? "On" : "Off");
     ImGui::Text("Render Debug %s", getRenderDebugModeLabel(imguiData->RenderDebugModeValue));
     ImGui::Text("Traced Depth %d", imguiData->TracedDepth);
@@ -735,6 +960,17 @@ void renderSceneObjectsSection()
     if (changed)
     {
         applyObjectTransform(selectedObjectIndex, translation, rotation, scale);
+    }
+
+    if (object.type == SceneObjectType::Water)
+    {
+        Geom::WaterSettings editedWater = object.water;
+        ImGui::Separator();
+        ImGui::TextUnformatted("Water Surface");
+        if (editWaterControls(editedWater))
+        {
+            applyWaterSettings(selectedObjectIndex, editedWater);
+        }
     }
 
     ImGui::Separator();
@@ -951,10 +1187,33 @@ bool intersectGeomForPicking(const Geom& geom, const Ray& ray, float maxDistance
 {
     glm::vec3 intersectionPoint;
     glm::vec3 normal;
+    glm::vec3 geometricNormal;
+    glm::vec3 tangent;
+    glm::vec2 uv;
     bool outside = false;
-    const float t = (geom.type == CUBE)
-        ? boxIntersectionTest(geom, ray, intersectionPoint, normal, outside)
-        : sphereIntersectionTest(geom, ray, intersectionPoint, normal, outside);
+    float t = -1.0f;
+    if (geom.type == CUBE)
+    {
+        t = boxIntersectionTest(geom, ray, intersectionPoint, normal, outside);
+    }
+    else if (geom.type == WATER_PLANE)
+    {
+        const float sceneTimeSeconds = (renderState != nullptr) ? renderState->sceneTimeSeconds : 0.0f;
+        t = waterIntersectionTest(
+            geom,
+            ray,
+            sceneTimeSeconds,
+            intersectionPoint,
+            normal,
+            geometricNormal,
+            tangent,
+            uv,
+            outside);
+    }
+    else
+    {
+        t = sphereIntersectionTest(geom, ray, intersectionPoint, normal, outside);
+    }
 
     if (t > MIN_INTERSECTION_T && t < maxDistance)
     {
@@ -1228,6 +1487,23 @@ void applyMaterialProperties(int materialId, const Material& material)
     }
 
     scene->updateMaterial(static_cast<size_t>(materialId), material);
+    iteration = 0;
+    renderState = &scene->state;
+}
+
+void applyWaterSettings(int objectIndex, const Geom::WaterSettings& water)
+{
+    if (scene == nullptr)
+    {
+        return;
+    }
+
+    if (objectIndex < 0 || objectIndex >= static_cast<int>(scene->objects.size()))
+    {
+        return;
+    }
+
+    scene->updateWaterSettings(static_cast<size_t>(objectIndex), water);
     iteration = 0;
     renderState = &scene->state;
 }
@@ -1733,6 +2009,7 @@ int main(int argc, char** argv)
     InitImguiData(guiData);
     InitDataContainer(guiData);
     syncEnvironmentUiFromScene();
+    resetSceneTimePlaybackClock();
 
     // GLFW main loop
     mainLoop();
@@ -1769,6 +2046,7 @@ void saveImage()
 
 void runCuda()
 {
+    updateSceneTimePlayback();
     syncCameraState();
 
     // Map OpenGL buffer object for writing from CUDA on a single GPU
@@ -1933,7 +2211,8 @@ void mousePositionCallback(GLFWwindow* window, double xpos, double ypos)
     }
     else if (rightMousePressed)
     {
-        zoom += static_cast<float>((ypos - lastY) / height);
+        const float zoomDrag = static_cast<float>(ypos - lastY) / static_cast<float>(height);
+        zoom *= expf(zoomDrag * 4.0f);
         zoom = std::fmax(0.1f, zoom);
         camchanged = true;
     }

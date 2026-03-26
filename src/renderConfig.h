@@ -48,10 +48,26 @@
 #define RENDER_CONFIG_MAX_RUSSIAN_ROULETTE_SURVIVAL 0.95f
 
 // Clamp on non-delta BSDF sample luminance to suppress glossy/transmissive fireflies.
-#define RENDER_CONFIG_MAX_NON_DELTA_SAMPLE_LUMINANCE 12.0f
+#define RENDER_CONFIG_MAX_NON_DELTA_SAMPLE_LUMINANCE 20.0f
 
 // Clamp on path throughput luminance after each bounce to reduce long-path caustic fireflies.
 #define RENDER_CONFIG_MAX_PATH_THROUGHPUT_LUMINANCE 10.0f
+
+// Maximum number of Gerstner wave components supported per water surface.
+#define RENDER_CONFIG_MAX_GERSTNER_WAVES 8
+
+// Fixed-point iterations used to intersect animated Gerstner water.
+#define RENDER_CONFIG_WATER_INTERSECTION_MAX_STEPS 12
+
+// Positional tolerance for iterative Gerstner water intersection convergence.
+#define RENDER_CONFIG_WATER_INTERSECTION_EPSILON 1.0e-4f
+
+// Minimum half-thickness used for water acceleration bounds.
+// The actual surface is still evaluated analytically; this only prevents BVH/AABB misses.
+#define RENDER_CONFIG_WATER_MIN_HALF_THICKNESS 0.1f
+
+// Local-space half-extent used to represent "infinite" water in acceleration structures.
+#define RENDER_CONFIG_WATER_INFINITE_HALF_EXTENT 128.0f
 
 // 1D CUDA block size used by tracing, sorting, and shading kernels.
 #define RENDER_CONFIG_PATH_TRACE_BLOCK_SIZE_1D 256

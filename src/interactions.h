@@ -21,6 +21,7 @@ struct BSDFSample
     glm::vec3 pathWeight;
     float pdf;
     int isDelta;
+    int sampledTransmission;
 };
 
 __host__ __device__ void computeLobeProbabilities(

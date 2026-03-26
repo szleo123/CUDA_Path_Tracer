@@ -2,6 +2,7 @@
 
 #include <cuda_runtime.h>
 
+#include "renderConfig.h"
 #include "glm/glm.hpp"
 
 #include <string>
@@ -12,7 +13,8 @@ constexpr int MAX_TEXTURE_UV_SETS = 3;
 enum GeomType
 {
     SPHERE,
-    CUBE
+    CUBE,
+    WATER_PLANE
 };
 
 enum ScenePrimitiveType
@@ -38,6 +40,35 @@ struct Geom
     glm::mat4 transform;
     glm::mat4 inverseTransform;
     glm::mat4 invTranspose;
+    struct WaterSettings
+    {
+        struct Wave
+        {
+            glm::vec2 direction = glm::vec2(1.0f, 0.0f);
+            float amplitude = 0.0f;
+            float wavelength = 1.0f;
+            float speed = 1.0f;
+            float steepness = 0.0f;
+        };
+
+        glm::vec2 uvScale = glm::vec2(1.0f);
+        glm::vec3 absorptionCoefficient = glm::vec3(0.0f);
+        glm::vec3 foamColor = glm::vec3(0.94f, 0.97f, 1.0f);
+        glm::vec3 shallowColor = glm::vec3(0.36f, 0.74f, 0.72f);
+        float maxVerticalDisplacement = 0.0f;
+        float fallbackAbsorptionDistance = 8.0f;
+        float foamIntensity = 0.0f;
+        float foamThreshold = 0.55f;
+        float foamSoftness = 0.18f;
+        float foamRoughness = 0.45f;
+        float shallowColorDistance = 2.5f;
+        float shallowColorStrength = 0.65f;
+        float shorelineFoamDistance = 0.90f;
+        float shorelineFoamIntensity = 0.75f;
+        int infinitePlane = 0;
+        int waveCount = 0;
+        Wave waves[RENDER_CONFIG_MAX_GERSTNER_WAVES];
+    } water;
 };
 
 struct Triangle
@@ -183,6 +214,11 @@ struct RenderState
     Camera camera;
     unsigned int iterations;
     int traceDepth;
+    float sceneTimeSeconds = 0.0f;
+    float frameDeltaTimeSeconds = 0.0f;
+    float stepDeltaTimeSeconds = 1.0f / 60.0f;
+    float playbackSpeed = 1.0f;
+    int playAnimation = 0;
     std::vector<glm::vec3> image;
     std::string imageName;
     EnvironmentSettings environment;

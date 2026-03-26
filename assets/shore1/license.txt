@@ -1,0 +1,11 @@
+Model Information:
+* title:	Rocky coast of the Sea of Japan N5
+* source:	https://sketchfab.com/3d-models/rocky-coast-of-the-sea-of-japan-n5-30ee01d97602460b8c951c34a0e0c74f
+* author:	sepett (https://sketchfab.com/sepett)
+
+Model License:
+* license type:	CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+* requirements:	Author must be credited. Commercial use is allowed.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "Rocky coast of the Sea of Japan N5" (https://sketchfab.com/3d-models/rocky-coast-of-the-sea-of-japan-n5-30ee01d97602460b8c951c34a0e0c74f) by sepett (https://sketchfab.com/sepett) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)

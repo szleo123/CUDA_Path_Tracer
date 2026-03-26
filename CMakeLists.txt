@@ -60,6 +60,7 @@ set(headers
     src/scene.h
     src/sceneStructs.h
     src/utilities.h
+    src/water.h
 )
 
 set(sources

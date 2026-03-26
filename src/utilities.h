@@ -29,7 +29,8 @@ enum RenderDebugMode
     RENDER_DEBUG_NONE = 0,
     RENDER_DEBUG_MESH_UV_CHECKER = 1,
     RENDER_DEBUG_MESH_BASE_COLOR = 2,
-    RENDER_DEBUG_MESH_TEXTURE_ONLY = 3
+    RENDER_DEBUG_MESH_TEXTURE_ONLY = 3,
+    RENDER_DEBUG_WATER_SURFACE = 4
 };
 
 enum ToneMapMode
@@ -90,7 +91,7 @@ public:
         , LastSortTimeMs(0.0f)
         , LastShadeTimeMs(0.0f)
         , LastNumShadedPaths(0)
-        , EnableFireflyMitigation(false)
+        , EnableFireflyMitigation(true)
         , MaxNonDeltaSampleLuminance(RENDER_CONFIG_MAX_NON_DELTA_SAMPLE_LUMINANCE)
         , MaxPathThroughputLuminance(RENDER_CONFIG_MAX_PATH_THROUGHPUT_LUMINANCE)
         , ExposureValue(0.0f)
