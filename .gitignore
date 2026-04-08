@@ -557,3 +557,12 @@ xcuserdata
 *.xccheckout
 *.moved-aside
 *.xcuserstate
+
+assets/**/*.hdr
+assets/**/*.bin
+assets/**/*.png
+assets/**/*.jpg
+assets/**/*.jpeg
+assets/**/*.obj
+
+debug_images/*
