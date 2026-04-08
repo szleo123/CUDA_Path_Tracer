@@ -14,7 +14,8 @@ enum GeomType
 {
     SPHERE,
     CUBE,
-    WATER_PLANE
+    WATER_PLANE,
+    VOLUME
 };
 
 enum ScenePrimitiveType
@@ -31,6 +32,12 @@ struct Ray
 
 struct Geom
 {
+    enum VolumeModel
+    {
+        VOLUME_MODEL_SDF = 0,
+        VOLUME_MODEL_CLOUD = 1
+    };
+
     enum GeomType type;
     int materialid;
     int objectIndex;
@@ -69,6 +76,35 @@ struct Geom
         int waveCount = 0;
         Wave waves[RENDER_CONFIG_MAX_GERSTNER_WAVES];
     } water;
+    struct VolumeSettings
+    {
+        int model = VOLUME_MODEL_SDF;
+        glm::vec3 albedo = glm::vec3(1.0f);
+        glm::vec3 windDirection = glm::vec3(1.0f, 0.0f, 0.25f);
+        float densityMultiplier = 1.0f;
+        float noiseScale = 3.0f;
+        float detailNoiseScale = 7.5f;
+        float densityThreshold = 0.52f;
+        float densitySoftness = 0.18f;
+        float stepSize = 0.08f;
+        float shadowStepSize = 0.12f;
+        float phaseAnisotropy = 0.45f;
+        float ambientIntensity = 0.0f;
+        float windSpeed = 0.04f;
+        float coverage = 0.48f;
+        float bottomFade = 0.10f;
+        float topFade = 0.22f;
+        float erosionStrength = 0.28f;
+        float detailErosionStrength = 0.42f;
+        float sdfPadding = 0.15f;
+        int sdfResolution = 64;
+    } volume;
+    glm::vec3 volumeMeshLocalBboxMin = glm::vec3(-0.5f);
+    glm::vec3 volumeMeshLocalBboxMax = glm::vec3(0.5f);
+    int volumeSdfOffset = -1;
+    int volumeSdfResolution = 0;
+    glm::vec3 volumeSdfBoundsMin = glm::vec3(-0.5f);
+    glm::vec3 volumeSdfBoundsMax = glm::vec3(0.5f);
 };
 
 struct Triangle
@@ -200,10 +236,12 @@ enum EnvironmentMode
 
 struct EnvironmentSettings
 {
-    int mode = ENVIRONMENT_PROCEDURAL_SKY;
+    int mode = ENVIRONMENT_NONE;
     int textureId = -1;
     float intensity = 1.0f;
     float rotation = 0.0f;
+    float rotationSpeed = 0.0f;
+    int rotateCounterClockwise = 0;
     glm::vec3 zenithColor = glm::vec3(0.55f, 0.72f, 1.0f);
     glm::vec3 horizonColor = glm::vec3(0.95f, 0.96f, 1.0f);
     glm::vec3 groundColor = glm::vec3(0.30f, 0.28f, 0.26f);

@@ -1,12 +1,13 @@
 {
-    "Environment": {
-        "TYPE": "ProceduralSky",
+    "Environment":
+    {
+        "TYPE": "HDR",
+        "FILE": "../assets/hdrs/sky_4k.hdr",
         "INTENSITY": 1.0,
-        "ROTATION": 0.0,
-        "SKY_ZENITH": [0.40, 0.62, 0.92],
-        "SKY_HORIZON": [0.91, 0.95, 0.99],
-        "GROUND_COLOR": [0.24, 0.25, 0.27]
-    },
+        "ROTATION": -150.0, 
+        "ROTATION_SPEED": 10.0,
+        "COUNTER_CLOCKWISE": true
+    }, 
     "Animation": {
         "TIME": 0.0,
         "STEP_DT": 0.0166667,
@@ -32,7 +33,7 @@
         }
     },
     "Camera": {
-        "RES": [1200, 800],
+        "RES": [1920, 1080],
         "FOVY": 50.0,
         "ITERATIONS": 5000,
         "DEPTH": 16,
@@ -54,16 +55,16 @@
                 "UV_SCALE": [10.0, 10.0],
                 "ABSORPTION_COEFF": [0.35, 0.18, 0.168],
                 "FALLBACK_ABSORPTION_DISTANCE": 16.0,
-                "FOAM_COLOR": [0.94, 0.97, 1.0],
+                "FOAM_COLOR": [0.84, 0.90, 0.94],
                 "SHALLOW_COLOR": [0.42, 0.76, 0.74],
                 "SHALLOW_COLOR_DISTANCE": 3.2,
                 "SHALLOW_COLOR_STRENGTH": 0.78,
-                "FOAM_INTENSITY": 0.10,
-                "FOAM_THRESHOLD": 0.76,
-                "FOAM_SOFTNESS": 0.10,
-                "FOAM_ROUGHNESS": 0.55,
-                "SHORELINE_FOAM_DISTANCE": 1.15,
-                "SHORELINE_FOAM_INTENSITY": 1.25,
+                "FOAM_INTENSITY": 0.06,
+                "FOAM_THRESHOLD": 0.80,
+                "FOAM_SOFTNESS": 0.08,
+                "FOAM_ROUGHNESS": 0.48,
+                "SHORELINE_FOAM_DISTANCE": 1.2,
+                "SHORELINE_FOAM_INTENSITY": 0.35,
                 "WAVES": [
                     { "DIR": [1.0, 0.18], "AMPLITUDE": 0.155, "WAVELENGTH": 2.80, "SPEED": 0.60, "STEEPNESS": 0.34 },
                     { "DIR": [0.86, 0.34], "AMPLITUDE": 0.090, "WAVELENGTH": 1.70, "SPEED": 0.84, "STEEPNESS": 0.30 },

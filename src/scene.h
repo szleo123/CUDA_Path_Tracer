@@ -12,6 +12,8 @@ enum class SceneObjectType
     Sphere,
     Cube,
     Water,
+    Volume,
+    Cloud,
     Mesh
 };
 
@@ -25,11 +27,17 @@ struct SceneObject
     glm::vec3 rotation;
     glm::vec3 scale;
     Geom::WaterSettings water;
+    Geom::VolumeSettings volume;
+    Geom::VolumeSettings initialVolume;
     std::string meshPath;
     std::vector<Triangle> localTriangles;
     std::vector<TriangleBvhNode> localBvhNodes;
     glm::vec3 localBboxMin = glm::vec3(0.0f);
     glm::vec3 localBboxMax = glm::vec3(0.0f);
+    std::vector<float> volumeSdfValues;
+    glm::vec3 volumeSdfBoundsMin = glm::vec3(0.0f);
+    glm::vec3 volumeSdfBoundsMax = glm::vec3(0.0f);
+    int volumeSdfResolution = 0;
     int triangleStart = -1;
     int triangleCount = 0;
     int bvhRootIndex = -1;
@@ -55,6 +63,9 @@ public:
     void updateWaterSettings(
         size_t objectIndex,
         const Geom::WaterSettings& water);
+    void updateVolumeSettings(
+        size_t objectIndex,
+        const Geom::VolumeSettings& volume);
     bool updateEnvironment(
         const EnvironmentSettings& environment,
         const std::string& hdrPath,
@@ -71,6 +82,7 @@ public:
     std::vector<std::string> materialNames;
     std::vector<TextureData> textures;
     std::vector<glm::vec4> texturePixels;
+    std::vector<float> volumeSdfData;
     RenderState state;
     std::filesystem::path sourceScenePath;
     std::string environmentTexturePath;

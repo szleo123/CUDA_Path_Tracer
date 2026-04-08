@@ -4,6 +4,7 @@
 #include "bvh.h"
 #include "utilities.h"
 #include "water.h"
+#include "volume.h"
 
 #include <glm/gtc/matrix_inverse.hpp>
 #include <glm/gtx/string_cast.hpp>
@@ -97,6 +98,14 @@ SceneObjectType parseSceneObjectType(const std::string& type)
     {
         return SceneObjectType::Water;
     }
+    if (type == "volume")
+    {
+        return SceneObjectType::Volume;
+    }
+    if (type == "cloud")
+    {
+        return SceneObjectType::Cloud;
+    }
     if (type == "mesh")
     {
         return SceneObjectType::Mesh;
@@ -164,6 +173,41 @@ Geom::WaterSettings defaultWaterSettings()
     water.waves[7].steepness = 0.48f;
     water.maxVerticalDisplacement = computeWaterMaxVerticalDisplacement(water);
     return water;
+}
+
+Geom::VolumeSettings defaultVolumeSettings()
+{
+    Geom::VolumeSettings volume{};
+    volume.model = Geom::VOLUME_MODEL_SDF;
+    volume.sdfResolution = 64;
+    volume.sdfPadding = 0.15f;
+    return volume;
+}
+
+Geom::VolumeSettings defaultCloudSettings()
+{
+    Geom::VolumeSettings volume{};
+    volume.model = Geom::VOLUME_MODEL_CLOUD;
+    volume.albedo = glm::vec3(0.98f, 0.99f, 1.0f);
+    volume.windDirection = glm::vec3(1.0f, 0.0f, 0.2f);
+    volume.densityMultiplier = 0.95f;
+    volume.noiseScale = 1.45f;
+    volume.detailNoiseScale = 6.5f;
+    volume.densityThreshold = 0.42f;
+    volume.densitySoftness = 0.16f;
+    volume.stepSize = 0.24f;
+    volume.shadowStepSize = 0.30f;
+    volume.phaseAnisotropy = 0.55f;
+    volume.ambientIntensity = 0.10f;
+    volume.windSpeed = 0.02f;
+    volume.coverage = 0.52f;
+    volume.bottomFade = 0.16f;
+    volume.topFade = 0.28f;
+    volume.erosionStrength = 0.22f;
+    volume.detailErosionStrength = 0.40f;
+    volume.sdfPadding = 0.0f;
+    volume.sdfResolution = 0;
+    return volume;
 }
 
 Geom::WaterSettings::Wave parseWaterWaveDefinition(const json& waveJson)
@@ -266,6 +310,370 @@ Geom::WaterSettings parseWaterSettings(const json& objectJson)
     return water;
 }
 
+Geom::VolumeSettings parseVolumeSettings(const json& objectJson, SceneObjectType objectType)
+{
+    Geom::VolumeSettings volume = objectType == SceneObjectType::Cloud
+        ? defaultCloudSettings()
+        : defaultVolumeSettings();
+    if (!objectJson.contains("VOLUME"))
+    {
+        return volume;
+    }
+
+    const json& volumeJson = objectJson["VOLUME"];
+    if (volumeJson.contains("ALBEDO"))
+    {
+        volume.albedo = glm::vec3(
+            volumeJson["ALBEDO"][0],
+            volumeJson["ALBEDO"][1],
+            volumeJson["ALBEDO"][2]);
+    }
+    if (volumeJson.contains("WIND_DIRECTION"))
+    {
+        volume.windDirection = glm::vec3(
+            volumeJson["WIND_DIRECTION"][0],
+            volumeJson["WIND_DIRECTION"][1],
+            volumeJson["WIND_DIRECTION"][2]);
+    }
+    volume.densityMultiplier = glm::max(volumeJson.value("DENSITY", volume.densityMultiplier), 0.0f);
+    const float legacyExtinction = glm::max(volumeJson.value("EXTINCTION", 1.0f), 0.0f);
+    volume.densityMultiplier *= legacyExtinction;
+    volume.noiseScale = glm::max(volumeJson.value("NOISE_SCALE", volume.noiseScale), 0.01f);
+    volume.detailNoiseScale = glm::max(volumeJson.value("DETAIL_NOISE_SCALE", volume.detailNoiseScale), 0.01f);
+    volume.densityThreshold = glm::clamp(volumeJson.value("DENSITY_THRESHOLD", volume.densityThreshold), 0.0f, 1.0f);
+    volume.densitySoftness = glm::max(volumeJson.value("DENSITY_SOFTNESS", volume.densitySoftness), 0.001f);
+    volume.stepSize = glm::max(volumeJson.value("STEP_SIZE", volume.stepSize), 0.005f);
+    volume.shadowStepSize = glm::max(volumeJson.value("SHADOW_STEP_SIZE", volume.shadowStepSize), 0.005f);
+    volume.phaseAnisotropy = glm::clamp(volumeJson.value("PHASE_G", volume.phaseAnisotropy), -0.95f, 0.95f);
+    volume.ambientIntensity = glm::max(volumeJson.value("AMBIENT_INTENSITY", volume.ambientIntensity), 0.0f);
+    volume.windSpeed = volumeJson.value("WIND_SPEED", volume.windSpeed);
+    volume.coverage = glm::clamp(volumeJson.value("COVERAGE", volume.coverage), 0.0f, 1.0f);
+    volume.bottomFade = glm::clamp(volumeJson.value("BOTTOM_FADE", volume.bottomFade), 0.001f, 0.95f);
+    volume.topFade = glm::clamp(volumeJson.value("TOP_FADE", volume.topFade), 0.001f, 0.95f);
+    volume.erosionStrength = glm::clamp(volumeJson.value("EROSION_STRENGTH", volume.erosionStrength), 0.0f, 1.0f);
+    volume.detailErosionStrength = glm::clamp(volumeJson.value("DETAIL_EROSION_STRENGTH", volume.detailErosionStrength), 0.0f, 1.0f);
+    volume.sdfPadding = glm::max(volumeJson.value("SDF_PADDING", volume.sdfPadding), 0.0f);
+    volume.sdfResolution = glm::max(volumeJson.value("SDF_RESOLUTION", volume.sdfResolution), 8);
+
+    volume.albedo = glm::clamp(volume.albedo, glm::vec3(0.0f), glm::vec3(1.0f));
+    if (glm::dot(volume.windDirection, volume.windDirection) <= EPSILON)
+    {
+        volume.windDirection = glm::vec3(1.0f, 0.0f, 0.25f);
+    }
+
+    return volume;
+}
+
+float pointAabbDistanceSquaredHost(
+    const glm::vec3& point,
+    const glm::vec3& bboxMin,
+    const glm::vec3& bboxMax)
+{
+    const glm::vec3 clampedPoint = glm::clamp(point, bboxMin, bboxMax);
+    return glm::dot(point - clampedPoint, point - clampedPoint);
+}
+
+float pointTriangleDistanceSquaredHost(
+    const glm::vec3& point,
+    const Triangle& triangle)
+{
+    const glm::vec3 a = triangle.p0;
+    const glm::vec3 b = triangle.p1;
+    const glm::vec3 c = triangle.p2;
+    const glm::vec3 ab = b - a;
+    const glm::vec3 ac = c - a;
+    const glm::vec3 ap = point - a;
+
+    const float d1 = glm::dot(ab, ap);
+    const float d2 = glm::dot(ac, ap);
+    if (d1 <= 0.0f && d2 <= 0.0f)
+    {
+        return glm::dot(point - a, point - a);
+    }
+
+    const glm::vec3 bp = point - b;
+    const float d3 = glm::dot(ab, bp);
+    const float d4 = glm::dot(ac, bp);
+    if (d3 >= 0.0f && d4 <= d3)
+    {
+        return glm::dot(point - b, point - b);
+    }
+
+    const float vc = d1 * d4 - d3 * d2;
+    if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f)
+    {
+        const float v = d1 / std::max(d1 - d3, EPSILON);
+        const glm::vec3 projection = a + v * ab;
+        return glm::dot(point - projection, point - projection);
+    }
+
+    const glm::vec3 cp = point - c;
+    const float d5 = glm::dot(ab, cp);
+    const float d6 = glm::dot(ac, cp);
+    if (d6 >= 0.0f && d5 <= d6)
+    {
+        return glm::dot(point - c, point - c);
+    }
+
+    const float vb = d5 * d2 - d1 * d6;
+    if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f)
+    {
+        const float w = d2 / std::max(d2 - d6, EPSILON);
+        const glm::vec3 projection = a + w * ac;
+        return glm::dot(point - projection, point - projection);
+    }
+
+    const float va = d3 * d6 - d5 * d4;
+    if (va <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f)
+    {
+        const glm::vec3 bc = c - b;
+        const float w = (d4 - d3) / std::max((d4 - d3) + (d5 - d6), EPSILON);
+        const glm::vec3 projection = b + w * bc;
+        return glm::dot(point - projection, point - projection);
+    }
+
+    const glm::vec3 normal = glm::normalize(glm::cross(ab, ac));
+    const float distanceToPlane = glm::dot(point - a, normal);
+    return distanceToPlane * distanceToPlane;
+}
+
+float queryNearestDistanceToTrianglesHost(
+    const glm::vec3& point,
+    const std::vector<Triangle>& triangles,
+    const std::vector<TriangleBvhNode>& nodes)
+{
+    if (triangles.empty() || nodes.empty())
+    {
+        return FLT_MAX;
+    }
+
+    int stack[RENDER_CONFIG_MAX_PICKING_BVH_STACK_SIZE];
+    int stackSize = 0;
+    stack[stackSize++] = 0;
+    float bestDistanceSquared = FLT_MAX;
+
+    while (stackSize > 0)
+    {
+        const TriangleBvhNode& node = nodes[stack[--stackSize]];
+        const float nodeDistanceSquared = pointAabbDistanceSquaredHost(point, node.bboxMin, node.bboxMax);
+        if (nodeDistanceSquared >= bestDistanceSquared)
+        {
+            continue;
+        }
+
+        if (node.triCount > 0)
+        {
+            for (int i = 0; i < node.triCount; ++i)
+            {
+                const int triangleIndex = node.leftFirst + i;
+                bestDistanceSquared = std::min(
+                    bestDistanceSquared,
+                    pointTriangleDistanceSquaredHost(point, triangles[triangleIndex]));
+            }
+            continue;
+        }
+
+        if (stackSize + 2 <= RENDER_CONFIG_MAX_PICKING_BVH_STACK_SIZE)
+        {
+            const int leftChild = node.leftFirst;
+            const int rightChild = node.rightChild;
+            const float leftDistanceSquared = pointAabbDistanceSquaredHost(point, nodes[leftChild].bboxMin, nodes[leftChild].bboxMax);
+            const float rightDistanceSquared = pointAabbDistanceSquaredHost(point, nodes[rightChild].bboxMin, nodes[rightChild].bboxMax);
+            if (leftDistanceSquared < rightDistanceSquared)
+            {
+                stack[stackSize++] = rightChild;
+                stack[stackSize++] = leftChild;
+            }
+            else
+            {
+                stack[stackSize++] = leftChild;
+                stack[stackSize++] = rightChild;
+            }
+        }
+    }
+
+    return sqrtf(bestDistanceSquared);
+}
+
+bool rayIntersectsTriangleHost(
+    const Triangle& triangle,
+    const Ray& ray,
+    float& outT)
+{
+    const glm::vec3 edge1 = triangle.p1 - triangle.p0;
+    const glm::vec3 edge2 = triangle.p2 - triangle.p0;
+    const glm::vec3 pvec = glm::cross(ray.direction, edge2);
+    const float det = glm::dot(edge1, pvec);
+    if (fabsf(det) < RENDER_CONFIG_TRIANGLE_DET_EPSILON)
+    {
+        return false;
+    }
+
+    const float invDet = 1.0f / det;
+    const glm::vec3 tvec = ray.origin - triangle.p0;
+    const float u = glm::dot(tvec, pvec) * invDet;
+    if (u < 0.0f || u > 1.0f)
+    {
+        return false;
+    }
+
+    const glm::vec3 qvec = glm::cross(tvec, edge1);
+    const float v = glm::dot(ray.direction, qvec) * invDet;
+    if (v < 0.0f || (u + v) > 1.0f)
+    {
+        return false;
+    }
+
+    outT = glm::dot(edge2, qvec) * invDet;
+    return outT > RENDER_CONFIG_TRIANGLE_MIN_INTERSECTION_T;
+}
+
+bool intersectAabbHost(
+    const Ray& ray,
+    const glm::vec3& bboxMin,
+    const glm::vec3& bboxMax,
+    float& outEntry)
+{
+    float tMin = 0.0f;
+    float tFar = FLT_MAX;
+
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        const float origin = ray.origin[axis];
+        const float direction = ray.direction[axis];
+        if (fabsf(direction) < EPSILON)
+        {
+            if (origin < bboxMin[axis] || origin > bboxMax[axis])
+            {
+                return false;
+            }
+            continue;
+        }
+
+        const float invDir = 1.0f / direction;
+        float t0 = (bboxMin[axis] - origin) * invDir;
+        float t1 = (bboxMax[axis] - origin) * invDir;
+        if (t0 > t1)
+        {
+            std::swap(t0, t1);
+        }
+
+        tMin = std::max(tMin, t0);
+        tFar = std::min(tFar, t1);
+        if (tMin > tFar)
+        {
+            return false;
+        }
+    }
+
+    outEntry = tMin;
+    return true;
+}
+
+int countRayMeshIntersectionsHost(
+    const Ray& ray,
+    const std::vector<Triangle>& triangles,
+    const std::vector<TriangleBvhNode>& nodes)
+{
+    if (triangles.empty() || nodes.empty())
+    {
+        return 0;
+    }
+
+    int stack[RENDER_CONFIG_MAX_PICKING_BVH_STACK_SIZE];
+    int stackSize = 0;
+    stack[stackSize++] = 0;
+    int crossings = 0;
+
+    while (stackSize > 0)
+    {
+        const TriangleBvhNode& node = nodes[stack[--stackSize]];
+        float nodeEntry = 0.0f;
+        if (!intersectAabbHost(ray, node.bboxMin, node.bboxMax, nodeEntry))
+        {
+            continue;
+        }
+
+        if (node.triCount > 0)
+        {
+            for (int i = 0; i < node.triCount; ++i)
+            {
+                float t = 0.0f;
+                if (rayIntersectsTriangleHost(triangles[node.leftFirst + i], ray, t))
+                {
+                    ++crossings;
+                }
+            }
+            continue;
+        }
+
+        if (stackSize + 2 <= RENDER_CONFIG_MAX_PICKING_BVH_STACK_SIZE)
+        {
+            stack[stackSize++] = node.rightChild;
+            stack[stackSize++] = node.leftFirst;
+        }
+    }
+
+    return crossings;
+}
+
+bool isPointInsideMeshHost(
+    const glm::vec3& point,
+    const std::vector<Triangle>& triangles,
+    const std::vector<TriangleBvhNode>& nodes)
+{
+    Ray ray{};
+    ray.origin = point + glm::normalize(glm::vec3(0.617f, 0.441f, 0.652f)) * (RAY_ORIGIN_BIAS * 8.0f);
+    ray.direction = glm::normalize(glm::vec3(0.617f, 0.441f, 0.652f));
+    return (countRayMeshIntersectionsHost(ray, triangles, nodes) & 1) == 1;
+}
+
+void buildVolumeMeshSdf(SceneObject& object)
+{
+    object.volumeSdfValues.clear();
+    object.volumeSdfResolution = 0;
+    object.volumeSdfBoundsMin = object.localBboxMin;
+    object.volumeSdfBoundsMax = object.localBboxMax;
+
+    if (object.localTriangles.empty() || object.localBvhNodes.empty())
+    {
+        return;
+    }
+
+    const int resolution = std::max(object.volume.sdfResolution, 8);
+    const glm::vec3 localExtent = object.localBboxMax - object.localBboxMin;
+    const float maxExtent = std::max(localExtent.x, std::max(localExtent.y, localExtent.z));
+    const float padding = std::max(object.volume.sdfPadding * std::max(maxExtent, 0.001f), 0.01f);
+    object.volumeSdfBoundsMin = object.localBboxMin - glm::vec3(padding);
+    object.volumeSdfBoundsMax = object.localBboxMax + glm::vec3(padding);
+    object.volumeSdfResolution = resolution;
+    object.volumeSdfValues.resize(static_cast<size_t>(resolution) * resolution * resolution, 0.0f);
+
+    const glm::vec3 sdfExtent = object.volumeSdfBoundsMax - object.volumeSdfBoundsMin;
+    for (int z = 0; z < resolution; ++z)
+    {
+        for (int y = 0; y < resolution; ++y)
+        {
+            for (int x = 0; x < resolution; ++x)
+            {
+                const glm::vec3 uvw(
+                    (static_cast<float>(x) + 0.5f) / static_cast<float>(resolution),
+                    (static_cast<float>(y) + 0.5f) / static_cast<float>(resolution),
+                    (static_cast<float>(z) + 0.5f) / static_cast<float>(resolution));
+                const glm::vec3 samplePoint = object.volumeSdfBoundsMin + uvw * sdfExtent;
+                const float distance = queryNearestDistanceToTrianglesHost(samplePoint, object.localTriangles, object.localBvhNodes);
+                const bool inside = isPointInsideMeshHost(samplePoint, object.localTriangles, object.localBvhNodes);
+                const float signedDistance = inside ? -distance : distance;
+                const size_t linearIndex =
+                    static_cast<size_t>(x)
+                    + static_cast<size_t>(y) * static_cast<size_t>(resolution)
+                    + static_cast<size_t>(z) * static_cast<size_t>(resolution) * static_cast<size_t>(resolution);
+                object.volumeSdfValues[linearIndex] = signedDistance;
+            }
+        }
+    }
+}
+
 Geom buildGeomFromObject(const SceneObject& object, int objectIndex)
 {
     Geom geom{};
@@ -276,6 +684,10 @@ Geom buildGeomFromObject(const SceneObject& object, int objectIndex)
     else if (object.type == SceneObjectType::Water)
     {
         geom.type = WATER_PLANE;
+    }
+    else if (object.type == SceneObjectType::Volume || object.type == SceneObjectType::Cloud)
+    {
+        geom.type = VOLUME;
     }
     else
     {
@@ -290,6 +702,13 @@ Geom buildGeomFromObject(const SceneObject& object, int objectIndex)
     geom.inverseTransform = glm::inverse(geom.transform);
     geom.invTranspose = glm::inverseTranspose(geom.transform);
     geom.water = object.water;
+    geom.volume = object.volume;
+    geom.volumeMeshLocalBboxMin = object.localBboxMin;
+    geom.volumeMeshLocalBboxMax = object.localBboxMax;
+    geom.volumeSdfOffset = -1;
+    geom.volumeSdfResolution = object.volumeSdfResolution;
+    geom.volumeSdfBoundsMin = object.volumeSdfBoundsMin;
+    geom.volumeSdfBoundsMax = object.volumeSdfBoundsMax;
     return geom;
 }
 
@@ -331,6 +750,10 @@ void appendGeomPrimitive(
     if (geom.type == WATER_PLANE)
     {
         getWaterLocalBounds(geom.water, localMin, localMax);
+    }
+    else if (geom.type == VOLUME)
+    {
+        getVolumeLocalBounds(geom, localMin, localMax);
     }
 
     ScenePrimitive primitive{};
@@ -398,6 +821,10 @@ std::string defaultObjectName(SceneObjectType type, int index)
         return "Cube " + std::to_string(index);
     case SceneObjectType::Water:
         return "Water " + std::to_string(index);
+    case SceneObjectType::Volume:
+        return "Volume " + std::to_string(index);
+    case SceneObjectType::Cloud:
+        return "Cloud " + std::to_string(index);
     case SceneObjectType::Mesh:
         return "Mesh " + std::to_string(index);
     default:
@@ -717,6 +1144,16 @@ int registerImportedMaterial(
     material.clearcoatRoughness = importedMaterial.clearcoatRoughnessFactor;
     material.occlusionStrength = importedMaterial.occlusionStrength;
     material.ambientOcclusion = 1.0f;
+    const glm::vec3 specularFactorColorDelta = importedMaterial.specularFactorColor - glm::vec3(1.0f);
+    const bool importedMaterialHasReflectiveSignals =
+        importedMaterial.metallicFactor > EPSILON
+        || !importedMaterial.metallicRoughnessTextureBytes.empty()
+        || !importedMaterial.metallicRoughnessTexturePath.empty()
+        || importedMaterial.hasExplicitSpecularColor != 0
+        || fabsf(importedMaterial.specularFactor - 1.0f) > EPSILON
+        || glm::dot(specularFactorColorDelta, specularFactorColorDelta) > EPSILON
+        || importedMaterial.transmissionFactor > EPSILON
+        || importedMaterial.clearcoatFactor > EPSILON;
     const float importedDielectricReflectivity = glm::clamp(
         glm::max(
             glm::max(material.specularColor.r, material.specularColor.g),
@@ -725,7 +1162,9 @@ int registerImportedMaterial(
         1.0f);
     material.hasReflective = fmaxf(
         material.hasReflective,
-        fmaxf(importedMaterial.metallicFactor, importedDielectricReflectivity));
+        importedMaterialHasReflectiveSignals
+            ? fmaxf(importedMaterial.metallicFactor, importedDielectricReflectivity)
+            : importedMaterial.metallicFactor);
     material.hasRefractive = fmaxf(material.hasRefractive, importedMaterial.transmissionFactor);
     if (glm::length(importedMaterial.emissiveFactor) > 0.0f
         || !importedMaterial.emissiveTextureBytes.empty()
@@ -1001,6 +1440,45 @@ void initializeMeshObject(
 
 }
 
+void initializeVolumeMeshBoundaryObject(
+    SceneObject& object,
+    const SceneImportContext& importContext)
+{
+    const std::filesystem::path meshPath = resolveScenePath(importContext.scenePath, object.meshPath);
+    object.meshPath = meshPath.string();
+
+    std::vector<MeshMaterialDefinition> ignoredImportedMaterials;
+    std::string error;
+    if (!loadMeshAsset(meshPath, object.materialId, object.localTriangles, ignoredImportedMaterials, error))
+    {
+        throw std::runtime_error(error);
+    }
+
+    for (Triangle& triangle : object.localTriangles)
+    {
+        triangle.materialId = object.materialId;
+    }
+    object.usedMaterialIds.clear();
+    object.usedMaterialIds.push_back(object.materialId);
+
+    std::vector<Triangle> localTriangles = object.localTriangles;
+    if (!buildTriangleBvh(localTriangles, object.localBvhNodes) || object.localBvhNodes.empty())
+    {
+        throw std::runtime_error("Failed to build volume mesh BVH: " + meshPath.string());
+    }
+    object.localTriangles.swap(localTriangles);
+    object.localBboxMin = object.localBvhNodes[0].bboxMin;
+    object.localBboxMax = object.localBvhNodes[0].bboxMax;
+    buildVolumeMeshSdf(object);
+
+    std::cout
+        << "Loaded volume mesh '" << object.name << "' from " << meshPath.string()
+        << " with " << object.localTriangles.size() << " triangles"
+        << " bboxMin=(" << object.localBboxMin.x << ", " << object.localBboxMin.y << ", " << object.localBboxMin.z << ")"
+        << " bboxMax=(" << object.localBboxMax.x << ", " << object.localBboxMax.y << ", " << object.localBboxMax.z << ")"
+        << std::endl;
+}
+
 void loadMaterialsFromJson(const json& materialsData, const SceneImportContext& importContext)
 {
     for (const auto& item : materialsData.items())
@@ -1043,8 +1521,13 @@ SceneObject parseSceneObjectDefinition(
     {
         object.water = parseWaterSettings(objectJson);
     }
+    else if (object.type == SceneObjectType::Volume || object.type == SceneObjectType::Cloud)
+    {
+        object.volume = parseVolumeSettings(objectJson, object.type);
+        object.initialVolume = object.volume;
+    }
 
-    if (object.type == SceneObjectType::Mesh)
+    if (objectJson.contains("FILE"))
     {
         object.meshPath = objectJson["FILE"];
     }
@@ -1068,6 +1551,19 @@ void loadObjectsFromJson(
         {
             std::vector<MeshMaterialDefinition> importedMaterials;
             initializeMeshObject(object, importContext, importContext.materials[object.materialId], importedMaterials);
+        }
+        else if (object.type == SceneObjectType::Volume)
+        {
+            if (object.meshPath.empty())
+            {
+                throw std::runtime_error("SDF volume requires FILE: " + object.name);
+            }
+            initializeVolumeMeshBoundaryObject(object, importContext);
+        }
+        else if (object.type == SceneObjectType::Cloud)
+        {
+            object.usedMaterialIds.clear();
+            object.usedMaterialIds.push_back(object.materialId);
         }
 
         objects.push_back(std::move(object));
@@ -1131,6 +1627,8 @@ std::string configureEnvironmentFromJson(
     RenderState& renderState)
 {
     EnvironmentSettings environment{};
+    environment.mode = ENVIRONMENT_NONE;
+    environment.textureId = -1;
     std::string environmentTexturePath;
 
     if (data.contains("Environment"))
@@ -1138,6 +1636,8 @@ std::string configureEnvironmentFromJson(
         const json& environmentData = data["Environment"];
         environment.intensity = environmentData.value("INTENSITY", 1.0f);
         environment.rotation = environmentData.value("ROTATION", 0.0f);
+        environment.rotationSpeed = environmentData.value("ROTATION_SPEED", 0.0f);
+        environment.rotateCounterClockwise = environmentData.value("COUNTER_CLOCKWISE", false) ? 1 : 0;
 
         if (environmentData.contains("SKY_ZENITH"))
         {
@@ -1268,13 +1768,36 @@ void Scene::rebuildRenderData()
     meshInstances.clear();
     scenePrimitives.clear();
     sceneBvhNodes.clear();
+    volumeSdfData.clear();
 
     for (size_t objectIndex = 0; objectIndex < objects.size(); ++objectIndex)
     {
-        const SceneObject& object = objects[objectIndex];
+        SceneObject& object = objects[objectIndex];
         if (object.type == SceneObjectType::Mesh)
         {
             appendMeshInstance(object, static_cast<int>(objectIndex), meshInstances, scenePrimitives);
+            continue;
+        }
+
+        if (object.type == SceneObjectType::Volume)
+        {
+            object.volumeSdfResolution = object.volumeSdfResolution > 0 ? object.volumeSdfResolution : std::max(object.volume.sdfResolution, 8);
+            if (!object.volumeSdfValues.empty())
+            {
+                const int sdfOffset = static_cast<int>(volumeSdfData.size());
+                volumeSdfData.insert(volumeSdfData.end(), object.volumeSdfValues.begin(), object.volumeSdfValues.end());
+                const int geomIndex = static_cast<int>(geoms.size());
+                geoms.push_back(buildGeomFromObject(object, static_cast<int>(objectIndex)));
+                geoms.back().volumeSdfOffset = sdfOffset;
+                appendGeomPrimitive(geoms.back(), geomIndex, scenePrimitives);
+                continue;
+            }
+        }
+        else if (object.type == SceneObjectType::Cloud)
+        {
+            const int geomIndex = static_cast<int>(geoms.size());
+            geoms.push_back(buildGeomFromObject(object, static_cast<int>(objectIndex)));
+            appendGeomPrimitive(geoms.back(), geomIndex, scenePrimitives);
             continue;
         }
 
@@ -1328,6 +1851,50 @@ void Scene::updateWaterSettings(
 
     objects[objectIndex].water = water;
     objects[objectIndex].water.maxVerticalDisplacement = computeWaterMaxVerticalDisplacement(objects[objectIndex].water);
+    rebuildRenderData();
+}
+
+void Scene::updateVolumeSettings(
+    size_t objectIndex,
+    const Geom::VolumeSettings& volume)
+{
+    if (objectIndex >= objects.size()
+        || (objects[objectIndex].type != SceneObjectType::Volume
+            && objects[objectIndex].type != SceneObjectType::Cloud))
+    {
+        return;
+    }
+
+    Geom::VolumeSettings& current = objects[objectIndex].volume;
+    const bool sdfSettingsChanged =
+        current.model != volume.model ||
+        current.sdfResolution != volume.sdfResolution
+        || fabsf(current.sdfPadding - volume.sdfPadding) > 1.0e-6f;
+
+    current = volume;
+    if (objects[objectIndex].type == SceneObjectType::Volume
+        && sdfSettingsChanged
+        && objects[objectIndex].localTriangles.empty()
+        && !objects[objectIndex].meshPath.empty())
+    {
+        std::unordered_map<std::string, uint32_t> temporaryMaterialMap;
+        std::unordered_map<std::string, uint32_t> temporaryImportedMaterialMap;
+        SceneImportContext importContext{
+            sourceScenePath,
+            temporaryMaterialMap,
+            texturePathToIdCache,
+            temporaryImportedMaterialMap,
+            materials,
+            materialNames,
+            textures,
+            texturePixels
+        };
+        initializeVolumeMeshBoundaryObject(objects[objectIndex], importContext);
+    }
+    else if (sdfSettingsChanged && !objects[objectIndex].localTriangles.empty())
+    {
+        buildVolumeMeshSdf(objects[objectIndex]);
+    }
     rebuildRenderData();
 }
 

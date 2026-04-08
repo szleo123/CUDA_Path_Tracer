@@ -1,0 +1,87 @@
+{
+    "Environment": {
+        "TYPE": "ProceduralSky",
+        "INTENSITY": 1.0,
+        "ROTATION": 0.0,
+        "SKY_ZENITH": [0.34, 0.56, 0.90],
+        "SKY_HORIZON": [0.94, 0.96, 0.99],
+        "GROUND_COLOR": [0.24, 0.25, 0.28]
+    },
+    "Animation": {
+        "TIME": 0.0,
+        "STEP_DT": 0.0166667,
+        "SPEED": 1.0,
+        "PLAY": false
+    },
+    "Materials": {
+        "ground": {
+            "TYPE": "Diffuse",
+            "RGB": [0.72, 0.73, 0.74],
+            "ROUGHNESS": 0.98
+        },
+        "backdrop": {
+            "TYPE": "Diffuse",
+            "RGB": [0.30, 0.34, 0.42],
+            "ROUGHNESS": 0.98
+        },
+        "volume_placeholder": {
+            "TYPE": "Diffuse",
+            "RGB": [1.0, 1.0, 1.0]
+        }
+    },
+    "Camera": {
+        "RES": [1200, 800],
+        "FOVY": 38.0,
+        "ITERATIONS": 5000,
+        "DEPTH": 14,
+        "FILE": "cloud_volume_test",
+        "EYE": [0.0, 2.2, 10.5],
+        "LOOKAT": [0.0, 2.6, 0.0],
+        "UP": [0.0, 1.0, 0.0]
+    },
+    "Objects": [
+        {
+            "NAME": "Ground",
+            "TYPE": "cube",
+            "MATERIAL": "ground",
+            "TRANS": [0.0, -0.05, 0.0],
+            "ROTAT": [0.0, 0.0, 0.0],
+            "SCALE": [12.0, 0.1, 12.0]
+        },
+        {
+            "NAME": "Backdrop",
+            "TYPE": "cube",
+            "MATERIAL": "backdrop",
+            "TRANS": [0.0, 4.0, -5.0],
+            "ROTAT": [0.0, 90.0, 0.0],
+            "SCALE": [0.1, 5.0, 10.0]
+        },
+        {
+            "NAME": "Cloud Box",
+            "TYPE": "volume",
+            "MATERIAL": "volume_placeholder",
+            "TRANS": [0.0, 3.2, -0.8],
+            "ROTAT": [0.0, 0.0, 0.0],
+            "SCALE": [4.2, 1.8, 2.8],
+            "VOLUME": {
+                "SHAPE": "cube",
+                "ALBEDO": [0.98, 0.98, 1.0],
+                "LIGHT_COLOR": [1.0, 0.97, 0.93],
+                "LIGHT_DIRECTION": [0.55, 1.0, 0.20],
+                "WIND_DIRECTION": [1.0, 0.0, 0.25],
+                "DENSITY": 1.65,
+                "EXTINCTION": 1.55,
+                "NOISE_SCALE": 3.4,
+                "DETAIL_NOISE_SCALE": 9.0,
+                "DENSITY_THRESHOLD": 0.52,
+                "DENSITY_SOFTNESS": 0.16,
+                "STEP_SIZE": 0.06,
+                "SHADOW_STEP_SIZE": 0.09,
+                "PHASE_G": 0.42,
+                "LIGHT_INTENSITY": 10.0,
+                "AMBIENT_INTENSITY": 0.10,
+                "WIND_SPEED": 0.05
+            }
+        }
+    ]
+}

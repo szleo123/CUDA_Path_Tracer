@@ -97,6 +97,14 @@ public:
         , ExposureValue(0.0f)
         , ToneMapModeValue(TONEMAP_REINHARD)
         , RenderDebugModeValue(RENDER_DEBUG_NONE)
+        , ExportAnimationActive(false)
+        , ExportStartTime(0.0f)
+        , ExportEndTime(1.0f)
+        , ExportFps(24)
+        , ExportSamplesPerFrame(256)
+        , ExportCurrentFrame(0)
+        , ExportTotalFrames(0)
+        , ExportCurrentFrameTime(0.0f)
     {}
     int TracedDepth;
     bool UseMaterialSort;
@@ -110,6 +118,14 @@ public:
     float ExposureValue;
     int ToneMapModeValue;
     int RenderDebugModeValue;
+    bool ExportAnimationActive;
+    float ExportStartTime;
+    float ExportEndTime;
+    int ExportFps;
+    int ExportSamplesPerFrame;
+    int ExportCurrentFrame;
+    int ExportTotalFrames;
+    float ExportCurrentFrameTime;
 };
 
 namespace utilityCore

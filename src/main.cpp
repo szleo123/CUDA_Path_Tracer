@@ -5,6 +5,7 @@
 #include "scene.h"
 #include "sceneStructs.h"
 #include "utilities.h"
+#include "volume.h"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_inverse.hpp>
@@ -24,6 +25,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <sstream>
@@ -88,6 +90,8 @@ static bool objectManipulationActive = false;
 static bool cudaSceneInitialized = false;
 static char environmentFilePathBuffer[1024] = {};
 static std::string environmentUiMessage;
+static char animationExportPrefixBuffer[1024] = {};
+static std::string animationExportUiMessage;
 static double lastSceneTimeWallClockSeconds = 0.0;
 static double manipulationStartX = 0.0;
 static double manipulationStartY = 0.0;
@@ -112,6 +116,7 @@ namespace
 void applyObjectTransform(int objectIndex, const glm::vec3& translation, const glm::vec3& rotation, const glm::vec3& scale);
 void applyMaterialProperties(int materialId, const Material& material);
 void applyWaterSettings(int objectIndex, const Geom::WaterSettings& water);
+void applyVolumeSettings(int objectIndex, const Geom::VolumeSettings& volume);
 void syncEnvironmentUiFromScene();
 void applyEnvironmentSettings(const EnvironmentSettings& environment, const std::string& hdrPath);
 void resetSceneTimePlaybackClock();
@@ -316,6 +321,72 @@ void syncEnvironmentUiFromScene()
         sizeof(environmentFilePathBuffer),
         "%s",
         scene->environmentTexturePath.c_str());
+}
+
+void cancelAnimationExport(bool keepMessage)
+{
+    if (imguiData == nullptr)
+    {
+        return;
+    }
+
+    imguiData->ExportAnimationActive = false;
+    imguiData->ExportCurrentFrame = 0;
+    imguiData->ExportTotalFrames = 0;
+    imguiData->ExportCurrentFrameTime = renderState != nullptr ? renderState->sceneTimeSeconds : 0.0f;
+    if (!keepMessage)
+    {
+        animationExportUiMessage.clear();
+    }
+}
+
+void beginAnimationExport()
+{
+    if (scene == nullptr || renderState == nullptr || imguiData == nullptr)
+    {
+        return;
+    }
+
+    const float startTime = imguiData->ExportStartTime;
+    const float endTime = imguiData->ExportEndTime;
+    const int fps = glm::max(imguiData->ExportFps, 1);
+    const int samplesPerFrame = glm::max(imguiData->ExportSamplesPerFrame, 1);
+
+    if (endTime < startTime)
+    {
+        animationExportUiMessage = "Animation export end time must be greater than or equal to start time.";
+        return;
+    }
+
+    std::string prefix = animationExportPrefixBuffer;
+    if (prefix.empty())
+    {
+        prefix = renderState->imageName.empty() ? "animation" : (renderState->imageName + "_anim");
+        std::snprintf(
+            animationExportPrefixBuffer,
+            sizeof(animationExportPrefixBuffer),
+            "%s",
+            prefix.c_str());
+    }
+
+    const float duration = glm::max(endTime - startTime, 0.0f);
+    const int totalFrames = glm::max(1, static_cast<int>(floorf(duration * static_cast<float>(fps) + 0.5f)) + 1);
+
+    imguiData->ExportAnimationActive = true;
+    imguiData->ExportCurrentFrame = 0;
+    imguiData->ExportTotalFrames = totalFrames;
+    imguiData->ExportSamplesPerFrame = samplesPerFrame;
+    imguiData->ExportCurrentFrameTime = startTime;
+
+    renderState->playAnimation = 0;
+    renderState->frameDeltaTimeSeconds = 0.0f;
+    setSceneTimeSeconds(startTime, 0.0f);
+    resetSceneTimePlaybackClock();
+    iteration = 0;
+
+    std::ostringstream ss;
+    ss << "Exporting " << totalFrames << " frame(s) to " << prefix << "_%04d.png";
+    animationExportUiMessage = ss.str();
 }
 
 bool editMaterialControls(Material& material)
@@ -539,6 +610,59 @@ bool editWaterControls(Geom::WaterSettings& water)
     return changed;
 }
 
+bool editVolumeControls(Geom::VolumeSettings& volume)
+{
+    bool changed = false;
+
+    changed |= ImGui::ColorEdit3("Albedo", &volume.albedo[0]);
+    changed |= ImGui::SliderFloat("Density", &volume.densityMultiplier, 0.0f, 8.0f);
+    changed |= ImGui::SliderFloat("Ambient Intensity", &volume.ambientIntensity, 0.0f, 4.0f);
+    changed |= ImGui::SliderFloat("Phase G", &volume.phaseAnisotropy, -0.95f, 0.95f);
+    changed |= ImGui::SliderFloat("Noise Scale", &volume.noiseScale, 0.1f, 12.0f);
+    changed |= ImGui::SliderFloat("Detail Noise Scale", &volume.detailNoiseScale, 0.1f, 24.0f);
+    changed |= ImGui::SliderFloat("Density Threshold", &volume.densityThreshold, 0.0f, 1.0f);
+    changed |= ImGui::SliderFloat("Density Softness", &volume.densitySoftness, 0.01f, 1.0f);
+    changed |= ImGui::DragFloat3("Wind Direction", &volume.windDirection[0], 0.01f, -1.0f, 1.0f, "%.2f");
+    changed |= ImGui::SliderFloat("Wind Speed", &volume.windSpeed, 0.0f, 0.25f);
+
+    if (volume.model == Geom::VOLUME_MODEL_CLOUD)
+    {
+        changed |= ImGui::SliderFloat("Coverage", &volume.coverage, 0.0f, 1.0f);
+        changed |= ImGui::SliderFloat("Bottom Fade", &volume.bottomFade, 0.01f, 0.6f);
+        changed |= ImGui::SliderFloat("Top Fade", &volume.topFade, 0.01f, 0.8f);
+        changed |= ImGui::SliderFloat("Erosion", &volume.erosionStrength, 0.0f, 1.0f);
+        changed |= ImGui::SliderFloat("Detail Erosion", &volume.detailErosionStrength, 0.0f, 1.0f);
+        changed |= ImGui::SliderFloat("Step Size", &volume.stepSize, 0.02f, 1.0f);
+        changed |= ImGui::SliderFloat("Shadow Step Size", &volume.shadowStepSize, 0.02f, 1.5f);
+    }
+
+    if (changed)
+    {
+        volume.albedo = glm::clamp(volume.albedo, glm::vec3(0.0f), glm::vec3(1.0f));
+        volume.densityMultiplier = glm::max(volume.densityMultiplier, 0.0f);
+        volume.ambientIntensity = glm::max(volume.ambientIntensity, 0.0f);
+        volume.phaseAnisotropy = glm::clamp(volume.phaseAnisotropy, -0.95f, 0.95f);
+        volume.noiseScale = glm::max(volume.noiseScale, 0.01f);
+        volume.detailNoiseScale = glm::max(volume.detailNoiseScale, 0.01f);
+        volume.densityThreshold = glm::clamp(volume.densityThreshold, 0.0f, 1.0f);
+        volume.densitySoftness = glm::max(volume.densitySoftness, 0.001f);
+        if (glm::dot(volume.windDirection, volume.windDirection) <= EPSILON)
+        {
+            volume.windDirection = glm::vec3(1.0f, 0.0f, 0.25f);
+        }
+        volume.windSpeed = glm::max(volume.windSpeed, 0.0f);
+        volume.coverage = glm::clamp(volume.coverage, 0.0f, 1.0f);
+        volume.bottomFade = glm::clamp(volume.bottomFade, 0.001f, 0.95f);
+        volume.topFade = glm::clamp(volume.topFade, 0.001f, 0.95f);
+        volume.erosionStrength = glm::clamp(volume.erosionStrength, 0.0f, 1.0f);
+        volume.detailErosionStrength = glm::clamp(volume.detailErosionStrength, 0.0f, 1.0f);
+        volume.stepSize = glm::max(volume.stepSize, 0.005f);
+        volume.shadowStepSize = glm::max(volume.shadowStepSize, 0.005f);
+    }
+
+    return changed;
+}
+
 void computeObjectLocalBounds(const SceneObject& object, glm::vec3& outMin, glm::vec3& outMax)
 {
     if (object.type == SceneObjectType::Mesh && object.triangleCount > 0)
@@ -550,6 +674,28 @@ void computeObjectLocalBounds(const SceneObject& object, glm::vec3& outMin, glm:
     if (object.type == SceneObjectType::Water)
     {
         getWaterLocalBounds(object.water, outMin, outMax);
+        return;
+    }
+    if (object.type == SceneObjectType::Volume || object.type == SceneObjectType::Cloud)
+    {
+        if (object.volumeSdfResolution > 0)
+        {
+            outMin = object.volumeSdfBoundsMin;
+            outMax = object.volumeSdfBoundsMax;
+        }
+        else
+        {
+            if (object.type == SceneObjectType::Cloud)
+            {
+                outMin = glm::vec3(-0.5f);
+                outMax = glm::vec3(0.5f);
+            }
+            else
+            {
+                outMin = object.localBboxMin;
+                outMax = object.localBboxMax;
+            }
+        }
         return;
     }
 
@@ -791,6 +937,38 @@ void renderAnalyticsSection()
     ImGui::Text("Frame Dt %.4f s", renderState->frameDeltaTimeSeconds);
 
     ImGui::Separator();
+    ImGui::TextUnformatted("Animation Export");
+    ImGui::InputText("Output Prefix", animationExportPrefixBuffer, IM_ARRAYSIZE(animationExportPrefixBuffer));
+    ImGui::DragFloat("Export Start", &imguiData->ExportStartTime, 0.01f, 0.0f, 0.0f, "%.3f s");
+    ImGui::DragFloat("Export End", &imguiData->ExportEndTime, 0.01f, 0.0f, 0.0f, "%.3f s");
+    ImGui::DragInt("Export FPS", &imguiData->ExportFps, 1.0f, 1, 240);
+    ImGui::DragInt("Samples/Frame", &imguiData->ExportSamplesPerFrame, 1.0f, 1, 100000);
+    if (!imguiData->ExportAnimationActive)
+    {
+        if (ImGui::Button("Start Export"))
+        {
+            beginAnimationExport();
+        }
+    }
+    else
+    {
+        ImGui::Text(
+            "Exporting frame %d / %d @ %.3f s",
+            imguiData->ExportCurrentFrame + 1,
+            imguiData->ExportTotalFrames,
+            imguiData->ExportCurrentFrameTime);
+        if (ImGui::Button("Cancel Export"))
+        {
+            animationExportUiMessage = "Animation export canceled.";
+            cancelAnimationExport(true);
+        }
+    }
+    if (!animationExportUiMessage.empty())
+    {
+        ImGui::TextWrapped("%s", animationExportUiMessage.c_str());
+    }
+
+    ImGui::Separator();
     ImGui::TextUnformatted("Firefly Mitigation");
     if (ImGui::Checkbox("Enable Firefly Mitigation", &imguiData->EnableFireflyMitigation))
     {
@@ -856,6 +1034,16 @@ void renderAnalyticsSection()
         }
         if (ImGui::SliderFloat("HDR Rotation", &environment.rotation, -180.0f, 180.0f, "%.1f deg"))
         {
+            applyEnvironmentSettings(environment, environmentFilePathBuffer);
+        }
+        if (ImGui::SliderFloat("HDR Rotation Speed", &environment.rotationSpeed, 0.0f, 30.0f, "%.2f deg/s"))
+        {
+            applyEnvironmentSettings(environment, environmentFilePathBuffer);
+        }
+        bool counterClockwise = environment.rotateCounterClockwise != 0;
+        if (ImGui::Checkbox("Counter-Clockwise", &counterClockwise))
+        {
+            environment.rotateCounterClockwise = counterClockwise ? 1 : 0;
             applyEnvironmentSettings(environment, environmentFilePathBuffer);
         }
         ImGui::InputText("HDR File", environmentFilePathBuffer, IM_ARRAYSIZE(environmentFilePathBuffer));
@@ -972,7 +1160,25 @@ void renderSceneObjectsSection()
             applyWaterSettings(selectedObjectIndex, editedWater);
         }
     }
-
+    else if (object.type == SceneObjectType::Volume || object.type == SceneObjectType::Cloud)
+    {
+        Geom::VolumeSettings editedVolume = object.volume;
+        ImGui::Separator();
+        ImGui::TextUnformatted(object.type == SceneObjectType::Cloud ? "Procedural Cloud" : "SDF Volume");
+        if (object.type == SceneObjectType::Volume && !object.meshPath.empty())
+        {
+            ImGui::TextWrapped("Source Mesh: %s", object.meshPath.c_str());
+        }
+        if (ImGui::Button("Reset Volume Tweaks"))
+        {
+            applyVolumeSettings(selectedObjectIndex, object.initialVolume);
+            editedVolume = scene->objects[selectedObjectIndex].volume;
+        }
+        if (editVolumeControls(editedVolume))
+        {
+            applyVolumeSettings(selectedObjectIndex, editedVolume);
+        }
+    }
     ImGui::Separator();
     ImGui::TextUnformatted("Material Slot");
     if (object.usedMaterialIds.empty())
@@ -1209,6 +1415,29 @@ bool intersectGeomForPicking(const Geom& geom, const Ray& ray, float maxDistance
             tangent,
             uv,
             outside);
+    }
+    else if (geom.type == VOLUME)
+    {
+        const Ray localRay = transformRayForPicking(ray, geom.inverseTransform);
+        glm::vec3 bboxMin(0.0f);
+        glm::vec3 bboxMax(0.0f);
+        if (geom.volumeSdfResolution > 0)
+        {
+            bboxMin = geom.volumeSdfBoundsMin;
+            bboxMax = geom.volumeSdfBoundsMax;
+        }
+        else
+        {
+            bboxMin = geom.volumeMeshLocalBboxMin;
+            bboxMax = geom.volumeMeshLocalBboxMax;
+        }
+        float localEntry = 0.0f;
+        if (intersectAabbForPicking(localRay, bboxMin, bboxMax, FLT_MAX, localEntry))
+        {
+            const glm::vec3 localPoint = localRay.origin + localEntry * localRay.direction;
+            const glm::vec3 worldPoint = multiplyMV(geom.transform, glm::vec4(localPoint, 1.0f));
+            t = glm::length(worldPoint - ray.origin);
+        }
     }
     else
     {
@@ -1504,6 +1733,23 @@ void applyWaterSettings(int objectIndex, const Geom::WaterSettings& water)
     }
 
     scene->updateWaterSettings(static_cast<size_t>(objectIndex), water);
+    iteration = 0;
+    renderState = &scene->state;
+}
+
+void applyVolumeSettings(int objectIndex, const Geom::VolumeSettings& volume)
+{
+    if (scene == nullptr)
+    {
+        return;
+    }
+
+    if (objectIndex < 0 || objectIndex >= static_cast<int>(scene->objects.size()))
+    {
+        return;
+    }
+
+    scene->updateVolumeSettings(static_cast<size_t>(objectIndex), volume);
     iteration = 0;
     renderState = &scene->state;
 }
@@ -2008,6 +2254,15 @@ int main(int argc, char** argv)
     // Initialize ImGui Data
     InitImguiData(guiData);
     InitDataContainer(guiData);
+    guiData->ExportStartTime = renderState->sceneTimeSeconds;
+    guiData->ExportEndTime = renderState->sceneTimeSeconds + 1.0f;
+    guiData->ExportSamplesPerFrame = glm::max(static_cast<int>(renderState->iterations), 1);
+    const std::string defaultExportPrefix = renderState->imageName.empty() ? "animation" : (renderState->imageName + "_anim");
+    std::snprintf(
+        animationExportPrefixBuffer,
+        sizeof(animationExportPrefixBuffer),
+        "%s",
+        defaultExportPrefix.c_str());
     syncEnvironmentUiFromScene();
     resetSceneTimePlaybackClock();
 
@@ -2017,12 +2272,10 @@ int main(int argc, char** argv)
     return 0;
 }
 
-void saveImage()
+void saveImageToFile(const std::string& baseFilename, float samples)
 {
     pathtraceDownloadImage();
 
-    const float samples = static_cast<float>(glm::max(iteration, 1));
-    // output image file
     Image img(width, height);
 
     for (int x = 0; x < width; x++)
@@ -2036,17 +2289,60 @@ void saveImage()
         }
     }
 
+    img.savePNG(baseFilename);
+}
+
+void saveAnimationExportFrame()
+{
+    if (renderState == nullptr || imguiData == nullptr)
+    {
+        return;
+    }
+
+    const float samples = static_cast<float>(glm::max(iteration, 1));
+    std::ostringstream ss;
+    ss << animationExportPrefixBuffer
+       << "_"
+       << std::setw(4)
+       << std::setfill('0')
+       << imguiData->ExportCurrentFrame;
+    saveImageToFile(ss.str(), samples);
+
+    if (imguiData->ExportCurrentFrame + 1 >= imguiData->ExportTotalFrames)
+    {
+        std::ostringstream done;
+        done << "Animation export finished: " << imguiData->ExportTotalFrames << " frame(s).";
+        animationExportUiMessage = done.str();
+        cancelAnimationExport(true);
+        return;
+    }
+
+    imguiData->ExportCurrentFrame++;
+    const float frameDt = 1.0f / static_cast<float>(glm::max(imguiData->ExportFps, 1));
+    const float nextFrameTime = imguiData->ExportStartTime
+        + static_cast<float>(imguiData->ExportCurrentFrame) * frameDt;
+    imguiData->ExportCurrentFrameTime = nextFrameTime;
+    setSceneTimeSeconds(nextFrameTime, frameDt);
+    resetSceneTimePlaybackClock();
+    iteration = 0;
+}
+
+void saveImage()
+{
+    const float samples = static_cast<float>(glm::max(iteration, 1));
     std::string filename = renderState->imageName;
     std::ostringstream ss;
     ss << filename << "." << startTimeString << "." << samples << "samp";
     filename = ss.str();
-
-    img.savePNG(filename);
+    saveImageToFile(filename, samples);
 }
 
 void runCuda()
 {
-    updateSceneTimePlayback();
+    if (!imguiData->ExportAnimationActive)
+    {
+        updateSceneTimePlayback();
+    }
     syncCameraState();
 
     // Map OpenGL buffer object for writing from CUDA on a single GPU
@@ -2067,7 +2363,11 @@ void runCuda()
         pathtraceResetAccumulation();
     }
 
-    if (iteration < renderState->iterations)
+    const int targetIterations = imguiData->ExportAnimationActive
+        ? glm::max(imguiData->ExportSamplesPerFrame, 1)
+        : renderState->iterations;
+
+    if (iteration < targetIterations)
     {
         uchar4* pbo_dptr = NULL;
         iteration++;
@@ -2082,11 +2382,18 @@ void runCuda()
     }
     else
     {
-        saveImage();
-        pathtraceFree();
-        cudaSceneInitialized = false;
-        cudaDeviceReset();
-        exit(EXIT_SUCCESS);
+        if (imguiData->ExportAnimationActive)
+        {
+            saveAnimationExportFrame();
+        }
+        else
+        {
+            saveImage();
+            pathtraceFree();
+            cudaSceneInitialized = false;
+            cudaDeviceReset();
+            exit(EXIT_SUCCESS);
+        }
     }
 }
 

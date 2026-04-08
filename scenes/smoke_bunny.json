@@ -1,0 +1,234 @@
+{
+    "Materials":  {
+                      "light":  {
+                                    "TYPE":  "Emitting",
+                                    "RGB":  [
+                                                1.0,
+                                                1.0,
+                                                1.0
+                                            ],
+                                    "EMITTANCE":  5.0
+                                },
+                      "diffuse_white":  {
+                                            "TYPE":  "Diffuse",
+                                            "RGB":  [
+                                                        0.94,
+                                                        0.94,
+                                                        0.92
+                                                    ]
+                                        },
+                      "diffuse_red":  {
+                                          "TYPE":  "Diffuse",
+                                          "RGB":  [
+                                                      0.82,
+                                                      0.28,
+                                                      0.26
+                                                  ]
+                                      },
+                      "diffuse_green":  {
+                                            "TYPE":  "Diffuse",
+                                            "RGB":  [
+                                                        0.28,
+                                                        0.72,
+                                                        0.34
+                                                    ]
+                                        },
+                      "bunny_base":  {
+                                         "TYPE":  "Diffuse",
+                                         "RGB":  [
+                                                     1.0,
+                                                     1.0,
+                                                     1.0
+                                                 ]
+                                     },
+                      "specular_white":  {
+                                             "TYPE":  "Specular",
+                                             "RGB":  [
+                                                         0.98,
+                                                         0.98,
+                                                         0.98
+                                                     ], 
+                                            "ROUGHNESS": 0.2,
+                                            "METALLIC": 0.2
+                                         },
+                      "glass_white":  {
+                                          "TYPE":  "Glass",
+                                          "RGB":  [
+                                                      0.98,
+                                                      0.98,
+                                                      0.98
+                                                  ],
+                                          "IOR":  1.5
+                                      }
+                  },
+    "Camera":  {
+                   "RES":  [
+                               800,
+                               800
+                           ],
+                   "FOVY":  45.0,
+                   "ITERATIONS":  5000,
+                   "DEPTH":  16,
+                   "FILE":  "smoke_bunny",
+                   "EYE":  [
+                               0.0,
+                               5.0,
+                               10.5
+                           ],
+                   "LOOKAT":  [
+                                  0.0,
+                                  5.0,
+                                  0.0
+                              ],
+                   "UP":  [
+                              0.0,
+                              1.0,
+                              0.0
+                          ]
+               },
+    "Objects":  [
+                    {
+                        "NAME":  "Light",
+                        "TYPE":  "cube",
+                        "MATERIAL":  "light",
+                        "TRANS":  [
+                                      0.0,
+                                      10.0,
+                                      0.0
+                                  ],
+                        "ROTAT":  [
+                                      0.0,
+                                      0.0,
+                                      0.0
+                                  ],
+                        "SCALE":  [
+                                      3.2,
+                                      0.3,
+                                      3.2
+                                  ]
+                    },
+                    {
+                        "NAME":  "Floor",
+                        "TYPE":  "cube",
+                        "MATERIAL":  "diffuse_white",
+                        "TRANS":  [
+                                      0.0,
+                                      0.0,
+                                      0.0
+                                  ],
+                        "ROTAT":  [
+                                      0.0,
+                                      0.0,
+                                      0.0
+                                  ],
+                        "SCALE":  [
+                                      10.0,
+                                      0.01,
+                                      10.0
+                                  ]
+                    },
+                    {
+                        "NAME":  "Ceiling",
+                        "TYPE":  "cube",
+                        "MATERIAL":  "diffuse_white",
+                        "TRANS":  [
+                                      0.0,
+                                      10.0,
+                                      0.0
+                                  ],
+                        "ROTAT":  [
+                                      0.0,
+                                      0.0,
+                                      90.0
+                                  ],
+                        "SCALE":  [
+                                      0.01,
+                                      10.0,
+                                      10.0
+                                  ]
+                    },
+                    {
+                        "NAME":  "Back Wall",
+                        "TYPE":  "cube",
+                        "MATERIAL":  "diffuse_white",
+                        "TRANS":  [
+                                      0.0,
+                                      5.0,
+                                      -5.0
+                                  ],
+                        "ROTAT":  [
+                                      0.0,
+                                      90.0,
+                                      0.0
+                                  ],
+                        "SCALE":  [
+                                      0.01,
+                                      10.0,
+                                      10.0
+                                  ]
+                    },
+                    {
+                        "NAME":  "Left Wall",
+                        "TYPE":  "cube",
+                        "MATERIAL":  "diffuse_red",
+                        "TRANS":  [
+                                      -5.0,
+                                      5.0,
+                                      0.0
+                                  ],
+                        "ROTAT":  [
+                                      0.0,
+                                      0.0,
+                                      0.0
+                                  ],
+                        "SCALE":  [
+                                      0.01,
+                                      10.0,
+                                      10.0
+                                  ]
+                    },
+                    {
+                        "NAME":  "Right Wall",
+                        "TYPE":  "cube",
+                        "MATERIAL":  "diffuse_green",
+                        "TRANS":  [
+                                      5.0,
+                                      5.0,
+                                      0.0
+                                  ],
+                        "ROTAT":  [
+                                      0.0,
+                                      0.0,
+                                      0.0
+                                  ],
+                        "SCALE":  [
+                                      0.01,
+                                      10.0,
+                                      10.0
+                                  ]
+                    },
+                    {
+                        "NAME": "Mesh Volume",
+                        "TYPE": "volume",
+                        "MATERIAL": "bunny_base",
+                        "FILE": "../assets/bunny/scene.gltf",
+                        "TRANS": [0, 0, 0],
+                        "ROTAT": [0.0, 0.0, 0.0],
+                        "SCALE": [30.0, 30.0, 30.0],
+                        "VOLUME": {
+                            "ALBEDO": [0.96, 0.97, 1.0],
+                            "WIND_DIRECTION": [0.8, 0.0, 0.45],
+                            "DENSITY": 2.1,
+                            "NOISE_SCALE": 3.1,
+                            "DETAIL_NOISE_SCALE": 7.2,
+                            "DENSITY_THRESHOLD": 0.34,
+                            "DENSITY_SOFTNESS": 0.28,
+                            "STEP_SIZE": 0.12,
+                            "SHADOW_STEP_SIZE": 0.18,
+                            "PHASE_G": 0.40,
+                            "AMBIENT_INTENSITY": 0.0,
+                            "WIND_SPEED": 0.03
+                        }
+                    }
+                ]
+}

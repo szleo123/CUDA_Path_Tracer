@@ -23,6 +23,7 @@
 #include "utilities.h"
 #include "intersections.h"
 #include "interactions.h"
+#include "volume.h"
 
 #define ERRORCHECK 1
 
@@ -125,6 +126,7 @@ static ScenePrimitive* dev_scenePrimitives = NULL;
 static SceneBvhNode* dev_sceneBvhNodes = NULL;
 static TextureData* dev_textures = NULL;
 static glm::vec4* dev_texturePixels = NULL;
+static float* dev_volumeSdfData = NULL;
 static PathSegment* dev_paths = NULL;
 static PathSegment* dev_pathsScratch = NULL;
 static ShadeableIntersection* dev_intersections = NULL;
@@ -146,6 +148,7 @@ static size_t dev_scenePrimitiveCount = 0;
 static size_t dev_sceneBvhNodeCount = 0;
 static size_t dev_textureCount = 0;
 static size_t dev_texturePixelCount = 0;
+static size_t dev_volumeSdfCount = 0;
 static int dev_environmentWidth = 0;
 static int dev_environmentHeight = 0;
 
@@ -446,6 +449,7 @@ void pathtraceInit(Scene* scene)
     uploadVectorToDevice(dev_sceneBvhNodes, dev_sceneBvhNodeCount, scene->sceneBvhNodes);
     uploadVectorToDevice(dev_textures, dev_textureCount, scene->textures);
     uploadVectorToDevice(dev_texturePixels, dev_texturePixelCount, scene->texturePixels);
+    uploadVectorToDevice(dev_volumeSdfData, dev_volumeSdfCount, scene->volumeSdfData);
 
     cudaMalloc(&dev_intersections, pixelcount * sizeof(ShadeableIntersection));
     cudaMalloc(&dev_intersectionsScratch, pixelcount * sizeof(ShadeableIntersection));
@@ -468,6 +472,7 @@ void pathtraceUpdateScene(Scene* scene)
     uploadVectorToDevice(dev_sceneBvhNodes, dev_sceneBvhNodeCount, scene->sceneBvhNodes);
     uploadVectorToDevice(dev_textures, dev_textureCount, scene->textures);
     uploadVectorToDevice(dev_texturePixels, dev_texturePixelCount, scene->texturePixels);
+    uploadVectorToDevice(dev_volumeSdfData, dev_volumeSdfCount, scene->volumeSdfData);
     uploadLightGeomData(scene);
     uploadEnvironmentSamplingData(scene);
     scene->gpuDynamicDataDirty = false;
@@ -520,6 +525,7 @@ void pathtraceFree()
     cudaFree(dev_sceneBvhNodes);
     cudaFree(dev_textures);
     cudaFree(dev_texturePixels);
+    cudaFree(dev_volumeSdfData);
     cudaFree(dev_intersections);
     cudaFree(dev_intersectionsScratch);
     cudaFree(dev_materialSortKeys);
@@ -622,6 +628,16 @@ struct TraceHit
     int triangleIndex;
 };
 
+__device__ bool traverseTriangleBvhClosest(
+    const Ray& ray,
+    const Triangle* triangles,
+    const TriangleBvhNode* nodes,
+    int nodeCount,
+    int rootNodeIndex,
+    int ignoreTriangleIndex,
+    float maxDistance,
+    TraceHit& outHit);
+
 __device__ inline bool intersectAabb(
     const Ray& ray,
     const glm::vec3& bboxMin,
@@ -698,6 +714,179 @@ __device__ inline void transformTraceHit(
         hit.shadingNormal = -hit.shadingNormal;
     }
     hit.t = glm::length(hit.point - worldRay.origin);
+}
+
+__device__ inline float computeMeshVolumeAverageScale(const Geom& volumeGeom)
+{
+    return fmaxf(
+        (fabsf(volumeGeom.scale.x) + fabsf(volumeGeom.scale.y) + fabsf(volumeGeom.scale.z)) / 3.0f,
+        0.001f);
+}
+
+__device__ inline float computeMeshVolumeWorldVoxelSize(const Geom& volumeGeom)
+{
+    if (volumeGeom.volumeSdfResolution <= 1)
+    {
+        return 0.02f;
+    }
+
+    const glm::vec3 boundsMin = volumeGeom.volumeSdfBoundsMin;
+    const glm::vec3 boundsMax = volumeGeom.volumeSdfBoundsMax;
+    const glm::vec3 localExtent = glm::max(boundsMax - boundsMin, glm::vec3(0.001f));
+    const float localVoxelSize = fmaxf(localExtent.x, fmaxf(localExtent.y, localExtent.z))
+        / fmaxf(static_cast<float>(volumeGeom.volumeSdfResolution - 1), 1.0f);
+    return fmaxf(localVoxelSize * computeMeshVolumeAverageScale(volumeGeom), 0.001f);
+}
+
+__device__ inline float sampleVolumeSdfTrilinear(
+    const Geom& volumeGeom,
+    const float* volumeSdfData,
+    const glm::vec3& worldPoint)
+{
+    if (volumeSdfData == nullptr
+        || volumeGeom.volumeSdfOffset < 0
+        || volumeGeom.volumeSdfResolution <= 1)
+    {
+        return FLT_MAX;
+    }
+
+    const glm::vec3 localPoint = volumeMultiplyMV(volumeGeom.inverseTransform, glm::vec4(worldPoint, 1.0f));
+    const glm::vec3 boundsMin = volumeGeom.volumeSdfBoundsMin;
+    const glm::vec3 boundsMax = volumeGeom.volumeSdfBoundsMax;
+    const glm::vec3 extent = glm::max(boundsMax - boundsMin, glm::vec3(0.001f));
+    const glm::vec3 uvw = (localPoint - boundsMin) / extent;
+    if (uvw.x < 0.0f || uvw.x > 1.0f
+        || uvw.y < 0.0f || uvw.y > 1.0f
+        || uvw.z < 0.0f || uvw.z > 1.0f)
+    {
+        return FLT_MAX;
+    }
+
+    const int resolution = volumeGeom.volumeSdfResolution;
+    const glm::vec3 gridCoord = uvw * static_cast<float>(resolution - 1);
+    const int x0 = glm::clamp(static_cast<int>(floorf(gridCoord.x)), 0, resolution - 1);
+    const int y0 = glm::clamp(static_cast<int>(floorf(gridCoord.y)), 0, resolution - 1);
+    const int z0 = glm::clamp(static_cast<int>(floorf(gridCoord.z)), 0, resolution - 1);
+    const int x1 = glm::min(x0 + 1, resolution - 1);
+    const int y1 = glm::min(y0 + 1, resolution - 1);
+    const int z1 = glm::min(z0 + 1, resolution - 1);
+    const glm::vec3 frac = gridCoord - glm::vec3(static_cast<float>(x0), static_cast<float>(y0), static_cast<float>(z0));
+
+    const int baseOffset = volumeGeom.volumeSdfOffset;
+    const int sliceStride = resolution * resolution;
+    const auto sampleVoxel = [&](int x, int y, int z) -> float
+    {
+        return volumeSdfData[baseOffset + x + y * resolution + z * sliceStride];
+    };
+
+    const float c000 = sampleVoxel(x0, y0, z0);
+    const float c100 = sampleVoxel(x1, y0, z0);
+    const float c010 = sampleVoxel(x0, y1, z0);
+    const float c110 = sampleVoxel(x1, y1, z0);
+    const float c001 = sampleVoxel(x0, y0, z1);
+    const float c101 = sampleVoxel(x1, y0, z1);
+    const float c011 = sampleVoxel(x0, y1, z1);
+    const float c111 = sampleVoxel(x1, y1, z1);
+
+    const float c00 = glm::mix(c000, c100, frac.x);
+    const float c10 = glm::mix(c010, c110, frac.x);
+    const float c01 = glm::mix(c001, c101, frac.x);
+    const float c11 = glm::mix(c011, c111, frac.x);
+    const float c0 = glm::mix(c00, c10, frac.y);
+    const float c1 = glm::mix(c01, c11, frac.y);
+    return glm::mix(c0, c1, frac.z);
+}
+
+__device__ inline float evaluateVolumeDensityWorld(
+    const Geom& volumeGeom,
+    const glm::vec3& worldPoint,
+    float sceneTimeSeconds,
+    const float* volumeSdfData)
+{
+    const glm::vec3 localPoint = volumeMultiplyMV(volumeGeom.inverseTransform, glm::vec4(worldPoint, 1.0f));
+    const float localModulation = evaluateVolumeDensityLocal(volumeGeom, localPoint, sceneTimeSeconds);
+    if (localModulation <= EPSILON)
+    {
+        return 0.0f;
+    }
+
+    if (volumeGeom.volume.model == Geom::VOLUME_MODEL_CLOUD)
+    {
+        glm::vec3 boundsMin(0.0f);
+        glm::vec3 boundsMax(0.0f);
+        getVolumeLocalBounds(volumeGeom, boundsMin, boundsMax);
+        const glm::vec3 localExtent = glm::max(boundsMax - boundsMin, glm::vec3(0.001f));
+        const glm::vec3 uvw = (localPoint - boundsMin) / localExtent;
+
+        const glm::vec3 rawWindDir = volumeGeom.volume.windDirection;
+        const float windDirLen2 = glm::dot(rawWindDir, rawWindDir);
+        const glm::vec3 windDir = windDirLen2 > EPSILON
+            ? glm::normalize(rawWindDir)
+            : glm::vec3(1.0f, 0.0f, 0.25f);
+        const glm::vec3 windOffset = glm::vec3(windDir.x, windDir.y * 0.2f, windDir.z)
+            * (volumeGeom.volume.windSpeed * sceneTimeSeconds);
+
+        const float baseFrequency = 0.018f * volumeGeom.volume.noiseScale;
+        const glm::vec3 worldNoisePos = glm::vec3(
+            worldPoint.x,
+            worldPoint.y * 0.42f,
+            worldPoint.z) * baseFrequency + windOffset;
+
+        const glm::vec3 warp(
+            volumeFbm(worldNoisePos * 0.55f + glm::vec3(13.1f, 7.3f, 3.7f)),
+            volumeFbm(worldNoisePos * 0.48f + glm::vec3(29.4f, 17.2f, 11.6f)),
+            volumeFbm(worldNoisePos * 0.52f + glm::vec3(-19.7f, 5.9f, 23.8f)));
+        const glm::vec3 warpedPos = worldNoisePos
+            + (warp - glm::vec3(0.5f)) * (1.8f + 1.6f * volumeGeom.volume.erosionStrength);
+
+        const float baseNoise = volumeFbm(warpedPos);
+        const float crossNoise = volumeFbm(glm::vec3(
+            worldPoint.z,
+            worldPoint.y * 0.35f,
+            -worldPoint.x) * (0.013f * volumeGeom.volume.noiseScale) + windOffset * 0.7f + glm::vec3(9.0f, 0.0f, -7.0f));
+        const float shapeNoise = glm::mix(baseNoise, crossNoise, 0.32f);
+
+        const float detailRatio = volumeGeom.volume.detailNoiseScale / fmaxf(volumeGeom.volume.noiseScale, 0.001f);
+        const float detailNoise = volumeFbm(warpedPos * (detailRatio * 1.25f) + glm::vec3(11.0f, 19.0f, 7.0f));
+
+        const float baseShape = volumeSmoothstep(
+            volumeGeom.volume.coverage - volumeGeom.volume.densitySoftness,
+            volumeGeom.volume.coverage + volumeGeom.volume.densitySoftness,
+            shapeNoise);
+        float erosion = (1.0f - detailNoise) * volumeGeom.volume.detailErosionStrength;
+        erosion += (1.0f - shapeNoise) * volumeGeom.volume.erosionStrength * 0.55f;
+        erosion *= glm::mix(0.85f, 1.15f, uvw.y);
+        const float cloudDensity = glm::clamp(baseShape - erosion, 0.0f, 1.0f);
+        return localModulation * cloudDensity * volumeGeom.volume.densityMultiplier;
+    }
+
+    if (volumeSdfData == nullptr || volumeGeom.volumeSdfOffset < 0 || volumeGeom.volumeSdfResolution <= 1)
+    {
+        return 0.0f;
+    }
+
+    const float signedDistance = sampleVolumeSdfTrilinear(volumeGeom, volumeSdfData, worldPoint);
+    if (signedDistance == FLT_MAX)
+    {
+        return 0.0f;
+    }
+
+    glm::vec3 boundsMin(0.0f);
+    glm::vec3 boundsMax(0.0f);
+    getVolumeLocalBounds(volumeGeom, boundsMin, boundsMax);
+    const glm::vec3 localExtent = glm::max(boundsMax - boundsMin, glm::vec3(0.001f));
+    const float localVoxelSize = fmaxf(localExtent.x, fmaxf(localExtent.y, localExtent.z))
+        / fmaxf(static_cast<float>(volumeGeom.volumeSdfResolution - 1), 1.0f);
+    const float interiorBlendWidth = fmaxf(localVoxelSize * computeMeshVolumeAverageScale(volumeGeom) * 2.0f, 0.02f);
+    const float worldDistance = signedDistance * computeMeshVolumeAverageScale(volumeGeom);
+    const float surfaceSupportWidth = fmaxf(interiorBlendWidth * 1.75f, 0.03f);
+    const float silhouetteMask = 1.0f - volumeSmoothstep(0.0f, surfaceSupportWidth, worldDistance);
+    const float interiorDepth = fmaxf(-worldDistance, 0.0f);
+    const float shapeCoreWidth = fmaxf(interiorBlendWidth * 4.0f, 0.06f);
+    const float coreMask = volumeSmoothstep(0.0f, shapeCoreWidth, interiorDepth);
+    const float surfaceDensityFloor = 0.58f;
+    const float sdfProfile = silhouetteMask * glm::mix(surfaceDensityFloor, 1.0f, coreMask);
+    return volumeGeom.volume.densityMultiplier * localModulation * sdfProfile;
 }
 
 __device__ bool traverseTriangleBvhClosest(
@@ -836,6 +1025,10 @@ __device__ bool intersectGeomDetailed(
     if (geom.type == CUBE)
     {
         hitT = boxIntersectionTest(geom, ray, point, normal, outside);
+    }
+    else if (geom.type == VOLUME)
+    {
+        return false;
     }
     else if (geom.type == WATER_PLANE)
     {
@@ -1144,6 +1337,20 @@ __host__ __device__ inline glm::vec3 clampLuminance(const glm::vec3& value, floa
     }
 
     return value * (maxLuminance / lum);
+}
+
+__host__ __device__ inline float computeEnvironmentContributionClamp(
+    int enableFireflyMitigation,
+    float maxNonDeltaSampleLuminance,
+    float maxPathThroughputLuminance)
+{
+    if (!enableFireflyMitigation)
+    {
+        return 0.0f;
+    }
+
+    const float baseClamp = fmaxf(maxNonDeltaSampleLuminance, maxPathThroughputLuminance);
+    return baseClamp > 0.0f ? (baseClamp * 1.5f) : 0.0f;
 }
 
 __device__ inline glm::vec3 offsetRayOrigin(
@@ -1518,6 +1725,14 @@ __device__ inline glm::vec3 evaluateTextureOnlyColor(
     return sampleTextureRgb(textures[material.textureId], uv, texturePixels);
 }
 
+__host__ __device__ inline float evaluateEnvironmentRotationDegrees(
+    const EnvironmentSettings& environment,
+    float sceneTimeSeconds)
+{
+    const float directionSign = environment.rotateCounterClockwise ? 1.0f : -1.0f;
+    return environment.rotation + directionSign * environment.rotationSpeed * sceneTimeSeconds;
+}
+
 __device__ inline glm::vec2 directionToEnvironmentUv(glm::vec3 direction, float rotationDegrees)
 {
     const float rotationRadians = rotationDegrees * (PI / 180.0f);
@@ -1570,6 +1785,7 @@ __device__ inline glm::vec3 evaluateProceduralSky(
 
 __device__ inline glm::vec3 sampleEnvironment(
     const EnvironmentSettings& environment,
+    float sceneTimeSeconds,
     glm::vec3 direction,
     const TextureData* textures,
     const glm::vec4* texturePixels)
@@ -1577,7 +1793,9 @@ __device__ inline glm::vec3 sampleEnvironment(
     glm::vec3 radiance(0.0f);
     if (environment.mode == ENVIRONMENT_HDR && environment.textureId >= 0)
     {
-        const glm::vec2 uv = directionToEnvironmentUv(direction, environment.rotation);
+        const glm::vec2 uv = directionToEnvironmentUv(
+            direction,
+            evaluateEnvironmentRotationDegrees(environment, sceneTimeSeconds));
         radiance = sampleTextureRgb(textures[environment.textureId], uv, texturePixels);
     }
     else if (environment.mode == ENVIRONMENT_PROCEDURAL_SKY)
@@ -1613,6 +1831,7 @@ __device__ inline bool hasEnvironmentImportanceSampling(
 
 __device__ inline float evaluateEnvironmentPdf(
     const EnvironmentSettings& environment,
+    float sceneTimeSeconds,
     glm::vec3 direction,
     const TextureData* textures,
     const float* environmentTexelPmf,
@@ -1629,7 +1848,9 @@ __device__ inline float evaluateEnvironmentPdf(
         return 0.0f;
     }
 
-    const glm::vec2 uv = directionToEnvironmentUv(direction, environment.rotation);
+    const glm::vec2 uv = directionToEnvironmentUv(
+        direction,
+        evaluateEnvironmentRotationDegrees(environment, sceneTimeSeconds));
     const float wrappedU = uv.x - floorf(uv.x);
     const float clampedV = glm::clamp(uv.y, 0.0f, 1.0f - 1e-6f);
     const int x = glm::clamp(static_cast<int>(wrappedU * environmentWidth), 0, environmentWidth - 1);
@@ -1651,6 +1872,7 @@ __device__ inline float evaluateEnvironmentPdf(
 __device__ inline bool sampleEnvironmentLight(
     thrust::default_random_engine& rng,
     const EnvironmentSettings& environment,
+    float sceneTimeSeconds,
     const TextureData* textures,
     const glm::vec4* texturePixels,
     const float* environmentTexelPmf,
@@ -1690,10 +1912,13 @@ __device__ inline bool sampleEnvironmentLight(
         (static_cast<float>(col) + jitterU) / static_cast<float>(environmentWidth),
         (static_cast<float>(row) + jitterV) / static_cast<float>(environmentHeight));
 
-    outDirection = environmentUvToDirection(uv, environment.rotation);
+    outDirection = environmentUvToDirection(
+        uv,
+        evaluateEnvironmentRotationDegrees(environment, sceneTimeSeconds));
     outRadiance = sampleTextureRgb(textures[environment.textureId], uv, texturePixels) * environment.intensity;
     outPdf = evaluateEnvironmentPdf(
         environment,
+        sceneTimeSeconds,
         outDirection,
         textures,
         environmentTexelPmf,
@@ -1784,18 +2009,21 @@ __device__ inline void applyWaterFoamToMaterial(
     }
 
     const float clampedFoam = glm::clamp(foamMask, 0.0f, 1.0f);
-    shadingMaterial.color = glm::mix(shadingMaterial.color, waterGeom.water.foamColor, clampedFoam);
+    const float colorFoam = glm::pow(clampedFoam, 1.35f);
+    const float transmissionFoam = glm::pow(clampedFoam, 1.8f);
+
+    shadingMaterial.color = glm::mix(shadingMaterial.color, waterGeom.water.foamColor, colorFoam);
     shadingMaterial.roughness = glm::mix(
         shadingMaterial.roughness,
         glm::max(shadingMaterial.roughness, waterGeom.water.foamRoughness),
-        clampedFoam);
-    shadingMaterial.hasRefractive *= (1.0f - 0.92f * clampedFoam);
-    shadingMaterial.transmissionFactor *= (1.0f - 0.95f * clampedFoam);
+        colorFoam);
+    shadingMaterial.hasRefractive *= (1.0f - 0.55f * transmissionFoam);
+    shadingMaterial.transmissionFactor *= (1.0f - 0.65f * transmissionFoam);
     shadingMaterial.metallic = 0.0f;
     shadingMaterial.specularColor = glm::mix(
         shadingMaterial.specularColor,
         waterGeom.water.foamColor,
-        0.30f * clampedFoam);
+        0.18f * colorFoam);
 }
 
 __device__ inline float queryWaterSceneDepthBelowSurface(
@@ -1943,6 +2171,383 @@ __device__ inline void applyWaterShallowTintToMaterial(
     shadingMaterial.roughness = glm::mix(shadingMaterial.roughness, 0.04f, tintFactor * 0.35f);
 }
 
+__device__ inline float evaluateHenyeyGreenstein(float cosTheta, float g)
+{
+    const float gg = g * g;
+    const float denom = 1.0f + gg - 2.0f * g * glm::clamp(cosTheta, -1.0f, 1.0f);
+    return (1.0f - gg) / fmaxf(4.0f * PI * powf(fabsf(denom), 1.5f), EPSILON);
+}
+
+__device__ inline glm::vec3 approximateVolumeMultipleScattering(
+    const Geom& volumeGeom,
+    const glm::vec3& directLightIrradiance,
+    float sigmaT)
+{
+    const float albedoEnergy = glm::clamp(luminance(volumeGeom.volume.albedo), 0.0f, 1.0f);
+    const float densityBounce = 1.0f - expf(-sigmaT * 0.65f);
+    const float anisotropyDamping = 1.0f - 0.35f * fabsf(volumeGeom.volume.phaseAnisotropy);
+    const float multipleScatterStrength = (0.20f + 0.55f * albedoEnergy) * anisotropyDamping;
+    return directLightIrradiance * (multipleScatterStrength * densityBounce);
+}
+
+__device__ inline void integrateVolumeInterval(
+    const Geom& volumeGeom,
+    const Ray& ray,
+    float tEntry,
+    float tExit,
+    float sceneTimeSeconds,
+    const float* volumeSdfData,
+    const Geom* geoms,
+    int geomCount,
+    const MeshInstance* meshInstances,
+    const ScenePrimitive* scenePrimitives,
+    const SceneBvhNode* sceneBvhNodes,
+    int sceneBvhNodeCount,
+    const Material* materials,
+    const TextureData* textures,
+    const glm::vec4* texturePixels,
+    const Triangle* triangles,
+    const TriangleBvhNode* triangleBvhNodes,
+    int triangleBvhNodeCount,
+    const int* lightGeomIndices,
+    int lightGeomCount,
+    glm::vec3& ioTransmittance,
+    glm::vec3& ioRadiance);
+
+__device__ inline void integrateVolumeTransmittanceInterval(
+    const Geom& volumeGeom,
+    const Ray& ray,
+    float tEntry,
+    float tExit,
+    float sceneTimeSeconds,
+    const float* volumeSdfData,
+    glm::vec3& ioTransmittance);
+
+__device__ inline glm::vec3 evaluateVolumeSceneLightIrradiance(
+    const glm::vec3& samplePoint,
+    const glm::vec3& viewDirection,
+    float sceneTimeSeconds,
+    const Geom* geoms,
+    int geomCount,
+    const MeshInstance* meshInstances,
+    const ScenePrimitive* scenePrimitives,
+    const SceneBvhNode* sceneBvhNodes,
+    int sceneBvhNodeCount,
+    const Material* materials,
+    const TextureData* textures,
+    const glm::vec4* texturePixels,
+    const Triangle* triangles,
+    const TriangleBvhNode* triangleBvhNodes,
+    int triangleBvhNodeCount,
+    const int* lightGeomIndices,
+    int lightGeomCount,
+    const float* volumeSdfData,
+    float phaseAnisotropy);
+
+__device__ inline glm::vec3 computeVolumeShadowTransmittance(
+    const Geom& volumeGeom,
+    float sceneTimeSeconds,
+    const glm::vec3& samplePoint,
+    const glm::vec3& toLight,
+    const float* volumeSdfData)
+{
+    Ray lightRay{};
+    lightRay.origin = offsetRayOriginAlongDirection(samplePoint, toLight, 2.0f);
+    lightRay.direction = glm::normalize(toLight);
+    glm::vec3 transmittance(1.0f);
+
+    float tEntry = 0.0f;
+    float tExit = 0.0f;
+    if (intersectVolumeAnalyticBounds(lightRay, volumeGeom, FLT_MAX, tEntry, tExit))
+    {
+        integrateVolumeTransmittanceInterval(
+            volumeGeom,
+            lightRay,
+            tEntry,
+            tExit,
+            sceneTimeSeconds,
+            volumeSdfData,
+            transmittance);
+    }
+
+    return transmittance;
+}
+
+__device__ inline void integrateVolumeTransmittanceInterval(
+    const Geom& volumeGeom,
+    const Ray& ray,
+    float tEntry,
+    float tExit,
+    float sceneTimeSeconds,
+    const float* volumeSdfData,
+    glm::vec3& ioTransmittance)
+{
+    float stepSize = glm::max(volumeGeom.volume.shadowStepSize, 0.005f);
+    if (volumeGeom.volume.model == Geom::VOLUME_MODEL_SDF)
+    {
+        const float voxelStep = computeMeshVolumeWorldVoxelSize(volumeGeom) * 0.75f;
+        stepSize = glm::max(glm::min(stepSize, voxelStep), 0.005f);
+    }
+    float t = glm::max(tEntry, 0.0f);
+    while (t < tExit && maxComponent(ioTransmittance) > 1.0e-3f)
+    {
+        const float dt = glm::min(stepSize, tExit - t);
+        const float sampleT = t + dt * 0.5f;
+        const glm::vec3 worldPoint = ray.origin + ray.direction * sampleT;
+        const float density = evaluateVolumeDensityWorld(
+            volumeGeom,
+            worldPoint,
+            sceneTimeSeconds,
+            volumeSdfData);
+        if (density > EPSILON)
+        {
+            const float sigmaT = density;
+            ioTransmittance *= glm::vec3(expf(-sigmaT * dt));
+        }
+        t += dt;
+    }
+}
+
+__device__ inline void integrateVolumeInterval(
+    const Geom& volumeGeom,
+    const Ray& ray,
+    float tEntry,
+    float tExit,
+    float sceneTimeSeconds,
+    const float* volumeSdfData,
+    const Geom* geoms,
+    int geomCount,
+    const MeshInstance* meshInstances,
+    const ScenePrimitive* scenePrimitives,
+    const SceneBvhNode* sceneBvhNodes,
+    int sceneBvhNodeCount,
+    const Material* materials,
+    const TextureData* textures,
+    const glm::vec4* texturePixels,
+    const Triangle* triangles,
+    const TriangleBvhNode* triangleBvhNodes,
+    int triangleBvhNodeCount,
+    const int* lightGeomIndices,
+    int lightGeomCount,
+    glm::vec3& ioTransmittance,
+    glm::vec3& ioRadiance)
+{
+    const float stepSize = glm::max(volumeGeom.volume.stepSize, 0.005f);
+    const glm::vec3 ambientRadiance = volumeGeom.volume.albedo * volumeGeom.volume.ambientIntensity;
+    float t = glm::max(tEntry, 0.0f);
+    while (t < tExit && maxComponent(ioTransmittance) > 1.0e-3f)
+    {
+        const float dt = glm::min(stepSize, tExit - t);
+        const float sampleT = t + dt * 0.5f;
+        const glm::vec3 worldPoint = ray.origin + ray.direction * sampleT;
+        const float density = evaluateVolumeDensityWorld(
+            volumeGeom,
+            worldPoint,
+            sceneTimeSeconds,
+            volumeSdfData);
+        if (density > EPSILON)
+        {
+            const float sigmaT = density;
+            const glm::vec3 sigmaS = volumeGeom.volume.albedo * sigmaT;
+            const glm::vec3 directLightIrradiance = evaluateVolumeSceneLightIrradiance(
+                worldPoint,
+                -ray.direction,
+                sceneTimeSeconds,
+                geoms,
+                geomCount,
+                meshInstances,
+                scenePrimitives,
+                sceneBvhNodes,
+                sceneBvhNodeCount,
+                materials,
+                textures,
+                texturePixels,
+                triangles,
+                triangleBvhNodes,
+                triangleBvhNodeCount,
+                lightGeomIndices,
+                lightGeomCount,
+                volumeSdfData,
+                volumeGeom.volume.phaseAnisotropy);
+            const glm::vec3 multipleScatterIrradiance = approximateVolumeMultipleScattering(
+                volumeGeom,
+                directLightIrradiance,
+                sigmaT);
+            const glm::vec3 inscatter = (directLightIrradiance + multipleScatterIrradiance + ambientRadiance) * sigmaS * dt;
+            ioRadiance += ioTransmittance * inscatter;
+            ioTransmittance *= glm::vec3(expf(-sigmaT * dt));
+        }
+        t += dt;
+    }
+}
+
+__device__ inline void marchAnalyticVolumeAlongRay(
+    const Geom& volumeGeom,
+    const Ray& ray,
+    float maxDistance,
+    float sceneTimeSeconds,
+    const float* volumeSdfData,
+    const Geom* geoms,
+    int geomCount,
+    const MeshInstance* meshInstances,
+    const ScenePrimitive* scenePrimitives,
+    const SceneBvhNode* sceneBvhNodes,
+    int sceneBvhNodeCount,
+    const Material* materials,
+    const TextureData* textures,
+    const glm::vec4* texturePixels,
+    const Triangle* triangles,
+    const TriangleBvhNode* triangleBvhNodes,
+    int triangleBvhNodeCount,
+    const int* lightGeomIndices,
+    int lightGeomCount,
+    glm::vec3& ioTransmittance,
+    glm::vec3& ioRadiance)
+{
+    float tEntry = 0.0f;
+    float tExit = 0.0f;
+    if (!intersectVolumeAnalyticBounds(ray, volumeGeom, maxDistance, tEntry, tExit))
+    {
+        return;
+    }
+
+    integrateVolumeInterval(
+        volumeGeom,
+        ray,
+        tEntry,
+        tExit,
+        sceneTimeSeconds,
+        volumeSdfData,
+        geoms,
+        geomCount,
+        meshInstances,
+        scenePrimitives,
+        sceneBvhNodes,
+        sceneBvhNodeCount,
+        materials,
+        textures,
+        texturePixels,
+        triangles,
+        triangleBvhNodes,
+        triangleBvhNodeCount,
+        lightGeomIndices,
+        lightGeomCount,
+        ioTransmittance,
+        ioRadiance);
+}
+
+__device__ inline void marchVolumeTransmittanceAlongRay(
+    const Geom& volumeGeom,
+    const Ray& ray,
+    float maxDistance,
+    float sceneTimeSeconds,
+    const float* volumeSdfData,
+    glm::vec3& ioTransmittance)
+{
+    float tEntry = 0.0f;
+    float tExit = 0.0f;
+    if (!intersectVolumeAnalyticBounds(ray, volumeGeom, maxDistance, tEntry, tExit))
+    {
+        return;
+    }
+
+    integrateVolumeTransmittanceInterval(
+        volumeGeom,
+        ray,
+        tEntry,
+        tExit,
+        sceneTimeSeconds,
+        volumeSdfData,
+        ioTransmittance);
+}
+
+__device__ inline void evaluateVolumeSegment(
+    const Ray& ray,
+    float maxDistance,
+    float sceneTimeSeconds,
+    const Geom* geoms,
+    int geomCount,
+    const float* volumeSdfData,
+    const MeshInstance* meshInstances,
+    const ScenePrimitive* scenePrimitives,
+    const SceneBvhNode* sceneBvhNodes,
+    int sceneBvhNodeCount,
+    const Material* materials,
+    const TextureData* textures,
+    const glm::vec4* texturePixels,
+    const Triangle* triangles,
+    const TriangleBvhNode* triangleBvhNodes,
+    int triangleBvhNodeCount,
+    const int* lightGeomIndices,
+    int lightGeomCount,
+    glm::vec3& outTransmittance,
+    glm::vec3& outRadiance)
+{
+    outTransmittance = glm::vec3(1.0f);
+    outRadiance = glm::vec3(0.0f);
+
+    for (int geomIndex = 0; geomIndex < geomCount; ++geomIndex)
+    {
+        const Geom& geom = geoms[geomIndex];
+        if (geom.type != VOLUME)
+        {
+            continue;
+        }
+
+        marchAnalyticVolumeAlongRay(
+            geom,
+            ray,
+            maxDistance,
+            sceneTimeSeconds,
+            volumeSdfData,
+            geoms,
+            geomCount,
+            meshInstances,
+            scenePrimitives,
+            sceneBvhNodes,
+            sceneBvhNodeCount,
+            materials,
+            textures,
+            texturePixels,
+            triangles,
+            triangleBvhNodes,
+            triangleBvhNodeCount,
+            lightGeomIndices,
+            lightGeomCount,
+            outTransmittance,
+            outRadiance);
+    }
+}
+
+__device__ inline void evaluateVolumeTransmittanceSegment(
+    const Ray& ray,
+    float maxDistance,
+    float sceneTimeSeconds,
+    const Geom* geoms,
+    int geomCount,
+    const float* volumeSdfData,
+    glm::vec3& outTransmittance)
+{
+    outTransmittance = glm::vec3(1.0f);
+
+    for (int geomIndex = 0; geomIndex < geomCount; ++geomIndex)
+    {
+        const Geom& geom = geoms[geomIndex];
+        if (geom.type != VOLUME)
+        {
+            continue;
+        }
+
+        marchVolumeTransmittanceAlongRay(
+            geom,
+            ray,
+            maxDistance,
+            sceneTimeSeconds,
+            volumeSdfData,
+            outTransmittance);
+    }
+}
+
 __host__ __device__ inline float luminance(const glm::vec3& color)
 {
     return 0.2126f * color.r + 0.7152f * color.g + 0.0722f * color.b;
@@ -1964,7 +2569,7 @@ __host__ __device__ inline float geomEmissiveArea(const Geom& geom, const Materi
         const float radius = 0.5f * glm::max(geom.scale.x, glm::max(geom.scale.y, geom.scale.z));
         return 4.0f * PI * radius * radius;
     }
-    if (geom.type == WATER_PLANE)
+    if (geom.type == WATER_PLANE || geom.type == VOLUME)
     {
         return 0.0f;
     }
@@ -2110,6 +2715,47 @@ __device__ int sampleLightIndex(
     return -1;
 }
 
+__device__ inline void sampleRepresentativePointOnLightForVolume(
+    const Geom& lightGeom,
+    const glm::vec3& samplePoint,
+    glm::vec3& outLightPoint,
+    glm::vec3& outLightNormal)
+{
+    if (lightGeom.type == SPHERE)
+    {
+        glm::vec3 localSample = multiplyMV(lightGeom.inverseTransform, glm::vec4(samplePoint, 1.0f));
+        if (glm::length2(localSample) <= EPSILON)
+        {
+            localSample = glm::vec3(0.0f, 1.0f, 0.0f);
+        }
+        const glm::vec3 localNormal = glm::normalize(localSample);
+        const glm::vec3 localPoint = localNormal * 0.5f;
+        outLightPoint = multiplyMV(lightGeom.transform, glm::vec4(localPoint, 1.0f));
+        outLightNormal = glm::normalize(multiplyMV(lightGeom.invTranspose, glm::vec4(localNormal, 0.0f)));
+        return;
+    }
+
+    const glm::vec3 localSample = multiplyMV(lightGeom.inverseTransform, glm::vec4(samplePoint, 1.0f));
+    const glm::vec3 absLocal = glm::abs(localSample);
+    int axis = 0;
+    if (absLocal.y > absLocal.x && absLocal.y >= absLocal.z)
+    {
+        axis = 1;
+    }
+    else if (absLocal.z > absLocal.x && absLocal.z > absLocal.y)
+    {
+        axis = 2;
+    }
+
+    glm::vec3 localPoint(0.0f);
+    glm::vec3 localNormal(0.0f);
+    const float sign = localSample[axis] >= 0.0f ? 1.0f : -1.0f;
+    localPoint[axis] = sign * 0.5f;
+    localNormal[axis] = sign;
+    outLightPoint = multiplyMV(lightGeom.transform, glm::vec4(localPoint, 1.0f));
+    outLightNormal = glm::normalize(multiplyMV(lightGeom.invTranspose, glm::vec4(localNormal, 0.0f)));
+}
+
 __device__ glm::vec3 computeShadowTransmittance(
     const Ray& shadowRay,
     float maxDistance,
@@ -2117,6 +2763,7 @@ __device__ glm::vec3 computeShadowTransmittance(
     int ignoreGeomId,
     int initialIgnoreTriangleIndex,
     const Geom* geoms,
+    int geomCount,
     const MeshInstance* meshInstances,
     const ScenePrimitive* scenePrimitives,
     const SceneBvhNode* sceneBvhNodes,
@@ -2126,12 +2773,28 @@ __device__ glm::vec3 computeShadowTransmittance(
     const glm::vec4* texturePixels,
     const Triangle* triangles,
     const TriangleBvhNode* triangleBvhNodes,
-    int triangleBvhNodeCount)
+    int triangleBvhNodeCount,
+    const float* volumeSdfData)
 {
     Ray currentRay = shadowRay;
     float remainingDistance = maxDistance;
     int ignoreTriangleIndex = initialIgnoreTriangleIndex;
     glm::vec3 transmittance(1.0f);
+
+    glm::vec3 volumeTransmittance(1.0f);
+    evaluateVolumeTransmittanceSegment(
+        shadowRay,
+        maxDistance,
+        sceneTimeSeconds,
+        geoms,
+        geomCount,
+        volumeSdfData,
+        volumeTransmittance);
+    transmittance *= volumeTransmittance;
+    if (maxComponent(transmittance) <= EPSILON)
+    {
+        return glm::vec3(0.0f);
+    }
 
     for (int step = 0; step < RENDER_CONFIG_SHADOW_TRANSMITTANCE_MAX_STEPS && remainingDistance > MIN_INTERSECTION_T; ++step)
     {
@@ -2195,6 +2858,98 @@ __device__ glm::vec3 computeShadowTransmittance(
     }
 
     return remainingDistance > MIN_INTERSECTION_T ? transmittance : glm::vec3(1.0f);
+}
+
+__device__ inline glm::vec3 evaluateVolumeSceneLightIrradiance(
+    const glm::vec3& samplePoint,
+    const glm::vec3& viewDirection,
+    float sceneTimeSeconds,
+    const Geom* geoms,
+    int geomCount,
+    const MeshInstance* meshInstances,
+    const ScenePrimitive* scenePrimitives,
+    const SceneBvhNode* sceneBvhNodes,
+    int sceneBvhNodeCount,
+    const Material* materials,
+    const TextureData* textures,
+    const glm::vec4* texturePixels,
+    const Triangle* triangles,
+    const TriangleBvhNode* triangleBvhNodes,
+    int triangleBvhNodeCount,
+    const int* lightGeomIndices,
+    int lightGeomCount,
+    const float* volumeSdfData,
+    float phaseAnisotropy)
+{
+    glm::vec3 irradiance(0.0f);
+    for (int i = 0; i < lightGeomCount; ++i)
+    {
+        const int lightGeomIdx = lightGeomIndices[i];
+        if (lightGeomIdx < 0)
+        {
+            continue;
+        }
+
+        const Geom& lightGeom = geoms[lightGeomIdx];
+        const Material& lightMaterial = materials[lightGeom.materialid];
+        if (lightMaterial.emittance <= 0.0f)
+        {
+            continue;
+        }
+
+        glm::vec3 lightPoint(0.0f);
+        glm::vec3 lightNormal(0.0f);
+        sampleRepresentativePointOnLightForVolume(lightGeom, samplePoint, lightPoint, lightNormal);
+
+        const glm::vec3 toLight = lightPoint - samplePoint;
+        const float dist2 = glm::dot(toLight, toLight);
+        if (dist2 <= EPSILON)
+        {
+            continue;
+        }
+
+        const float dist = sqrtf(dist2);
+        const glm::vec3 wi = toLight / dist;
+        const float cosLight = glm::max(0.0f, glm::dot(lightNormal, -wi));
+        if (cosLight <= 0.0f)
+        {
+            continue;
+        }
+
+        Ray shadowRay{};
+        shadowRay.origin = offsetRayOriginAlongDirection(samplePoint, wi, 2.0f);
+        shadowRay.direction = wi;
+        const glm::vec3 shadowTransmittance = computeShadowTransmittance(
+            shadowRay,
+            dist,
+            sceneTimeSeconds,
+            lightGeomIdx,
+            -1,
+            geoms,
+            geomCount,
+            meshInstances,
+            scenePrimitives,
+            sceneBvhNodes,
+            sceneBvhNodeCount,
+            materials,
+            textures,
+            texturePixels,
+            triangles,
+            triangleBvhNodes,
+            triangleBvhNodeCount,
+            volumeSdfData);
+        if (glm::length2(shadowTransmittance) <= 0.0f)
+        {
+            continue;
+        }
+
+        const float lightArea = geomEmissiveArea(lightGeom, lightMaterial);
+        const glm::vec3 Le = evaluateAnalyticLightEmission(lightMaterial);
+        const float phase = evaluateHenyeyGreenstein(glm::dot(wi, glm::normalize(viewDirection)), phaseAnisotropy);
+        irradiance += Le * shadowTransmittance * (cosLight * lightArea / fmaxf(dist2, EPSILON)) * phase;
+    }
+
+    return irradiance;
 }
 
 __device__ inline glm::vec3 computeWaterAbsorptionTransmittance(
@@ -2377,6 +3132,7 @@ __device__ inline void sampleDirectAnalyticLights(
     const glm::vec3& shadingNormal,
     const glm::vec3& wo,
     const Geom* geoms,
+    int geomCount,
     const MeshInstance* meshInstances,
     const ScenePrimitive* scenePrimitives,
     const SceneBvhNode* sceneBvhNodes,
@@ -2387,6 +3143,7 @@ __device__ inline void sampleDirectAnalyticLights(
     int triangleBvhNodeCount,
     const TextureData* textures,
     const glm::vec4* texturePixels,
+    const float* volumeSdfData,
     const int* lightGeomIndices,
     const float* geomLightSelectionPmf,
     int lightGeomCount,
@@ -2454,6 +3211,7 @@ __device__ inline void sampleDirectAnalyticLights(
         lightGeomIdx,
         intersection.triangleIndex,
         geoms,
+        geomCount,
         meshInstances,
         scenePrimitives,
         sceneBvhNodes,
@@ -2463,7 +3221,8 @@ __device__ inline void sampleDirectAnalyticLights(
         texturePixels,
         triangles,
         triangleBvhNodes,
-        triangleBvhNodeCount);
+        triangleBvhNodeCount,
+        volumeSdfData);
     if (glm::length2(shadowTransmittance) <= 0.0f)
     {
         return;
@@ -2503,6 +3262,7 @@ __device__ inline void sampleDirectEnvironmentLightContribution(
     const glm::vec3& shadingNormal,
     const glm::vec3& wo,
     const Geom* geoms,
+    int geomCount,
     const MeshInstance* meshInstances,
     const ScenePrimitive* scenePrimitives,
     const SceneBvhNode* sceneBvhNodes,
@@ -2513,12 +3273,16 @@ __device__ inline void sampleDirectEnvironmentLightContribution(
     int triangleBvhNodeCount,
     const TextureData* textures,
     const glm::vec4* texturePixels,
+    const float* volumeSdfData,
     EnvironmentSettings environment,
     const float* environmentTexelPmf,
     const float* environmentAliasProb,
     const int* environmentAliasIndex,
     int environmentWidth,
     int environmentHeight,
+    int enableFireflyMitigation,
+    float maxNonDeltaSampleLuminance,
+    float maxPathThroughputLuminance,
     glm::vec3* image)
 {
     if (!hasEnvironmentImportanceSampling(
@@ -2539,6 +3303,7 @@ __device__ inline void sampleDirectEnvironmentLightContribution(
     if (!sampleEnvironmentLight(
             rng,
             environment,
+            sceneTimeSeconds,
             textures,
             texturePixels,
             environmentTexelPmf,
@@ -2570,6 +3335,7 @@ __device__ inline void sampleDirectEnvironmentLightContribution(
         -1,
         intersection.triangleIndex,
         geoms,
+        geomCount,
         meshInstances,
         scenePrimitives,
         sceneBvhNodes,
@@ -2579,7 +3345,8 @@ __device__ inline void sampleDirectEnvironmentLightContribution(
         texturePixels,
         triangles,
         triangleBvhNodes,
-        triangleBvhNodeCount);
+        triangleBvhNodeCount,
+        volumeSdfData);
     if (glm::length2(shadowTransmittance) <= 0.0f)
     {
         return;
@@ -2593,8 +3360,17 @@ __device__ inline void sampleDirectEnvironmentLightContribution(
 
     const float bsdfPdf = evaluateBsdfPdf(shadingMaterial, wo, shadingNormal, envWi);
     const float misWeight = powerHeuristic(envPdf, bsdfPdf);
-    const glm::vec3 directLi = pathSegment.color * shadowTransmittance * f * envRadiance
+    glm::vec3 directLi = pathSegment.color * shadowTransmittance * f * envRadiance
         * (cosSurface * misWeight / fmaxf(envPdf, EPSILON));
+    if (enableFireflyMitigation)
+    {
+        directLi = clampLuminance(
+            directLi,
+            computeEnvironmentContributionClamp(
+                enableFireflyMitigation,
+                maxNonDeltaSampleLuminance,
+                maxPathThroughputLuminance));
+    }
     image[pathSegment.pixelIndex] += directLi;
 }
 
@@ -2608,6 +3384,7 @@ __global__ void shadeMaterialPaths(
     PathSegment* pathSegments,
     const Material* materials,
     const Geom* geoms,
+    int geomCount,
     const MeshInstance* meshInstances,
     const ScenePrimitive* scenePrimitives,
     const SceneBvhNode* sceneBvhNodes,
@@ -2617,6 +3394,7 @@ __global__ void shadeMaterialPaths(
     int triangleBvhNodeCount,
     const TextureData* textures,
     const glm::vec4* texturePixels,
+    const float* volumeSdfData,
     EnvironmentSettings environment,
     const float* environmentTexelPmf,
     const float* environmentAliasProb,
@@ -2642,6 +3420,36 @@ __global__ void shadeMaterialPaths(
         if (pathSegment.remainingBounces <= 0) {
             return;
         }
+
+        const float mediumMaxDistance = (intersection.t > 0.0f) ? intersection.t : FLT_MAX;
+        glm::vec3 volumeTransmittance(1.0f);
+        glm::vec3 volumeRadiance(0.0f);
+        evaluateVolumeSegment(
+            pathSegment.ray,
+            mediumMaxDistance,
+            sceneTimeSeconds,
+            geoms,
+            geomCount,
+            volumeSdfData,
+            meshInstances,
+            scenePrimitives,
+            sceneBvhNodes,
+            sceneBvhNodeCount,
+            materials,
+            textures,
+            texturePixels,
+            triangles,
+            triangleBvhNodes,
+            triangleBvhNodeCount,
+            lightGeomIndices,
+            lightGeomCount,
+            volumeTransmittance,
+            volumeRadiance);
+        if (glm::length2(volumeRadiance) > 0.0f)
+        {
+            image[pathSegment.pixelIndex] += pathSegment.color * volumeRadiance;
+        }
+        pathSegment.color *= volumeTransmittance;
 
         if (intersection.t > 0.0f) {
             const Material& material = materials[intersection.materialId];
@@ -2786,12 +3594,16 @@ __global__ void shadeMaterialPaths(
                     const float shorelineFoamFactor = waterGeom.water.shorelineFoamDistance > EPSILON
                         ? (1.0f - glm::clamp(shallowDepth / waterGeom.water.shorelineFoamDistance, 0.0f, 1.0f))
                         : 0.0f;
-                    const float shorelineFoam = waterGeom.water.shorelineFoamIntensity
+                    const float rawShorelineFoam = waterGeom.water.shorelineFoamIntensity
                         * glm::max(
                             shorelineFoamFactor * shorelineFoamFactor,
                             lateralContact * lateralContact)
                         * evaluateShorelineFoamBreakup(waterGeom, intersect, sceneTimeSeconds);
-                    foamMask = glm::max(foamMask, shorelineFoam);
+                    const float shorelineFoam = glm::pow(glm::clamp(rawShorelineFoam, 0.0f, 1.0f), 1.75f);
+                    foamMask = glm::clamp(
+                        foamMask + shorelineFoam * (1.0f - foamMask),
+                        0.0f,
+                        1.0f);
                     if (glm::dot(pathSegment.ray.direction, intersection.geometricNormal) > 0.0f)
                     {
                         foamMask *= 0.2f;
@@ -2822,6 +3634,7 @@ __global__ void shadeMaterialPaths(
                         shadingNormal,
                         wo,
                         geoms,
+                        geomCount,
                         meshInstances,
                         scenePrimitives,
                         sceneBvhNodes,
@@ -2832,6 +3645,7 @@ __global__ void shadeMaterialPaths(
                         triangleBvhNodeCount,
                         textures,
                         texturePixels,
+                        volumeSdfData,
                         lightGeomIndices,
                         geomLightSelectionPmf,
                         lightGeomCount,
@@ -2849,6 +3663,7 @@ __global__ void shadeMaterialPaths(
                         shadingNormal,
                         wo,
                         geoms,
+                        geomCount,
                         meshInstances,
                         scenePrimitives,
                         sceneBvhNodes,
@@ -2859,12 +3674,16 @@ __global__ void shadeMaterialPaths(
                         triangleBvhNodeCount,
                         textures,
                         texturePixels,
+                        volumeSdfData,
                         environment,
                         environmentTexelPmf,
                         environmentAliasProb,
                         environmentAliasIndex,
                         environmentWidth,
                         environmentHeight,
+                        enableFireflyMitigation,
+                        maxNonDeltaSampleLuminance,
+                        maxPathThroughputLuminance,
                         image);
                 }
 
@@ -2940,6 +3759,7 @@ __global__ void shadeMaterialPaths(
             {
                 const float environmentPdf = evaluateEnvironmentPdf(
                     environment,
+                    sceneTimeSeconds,
                     pathSegment.ray.direction,
                     textures,
                     environmentTexelPmf,
@@ -2950,8 +3770,19 @@ __global__ void shadeMaterialPaths(
                     misWeight = powerHeuristic(pathSegment.lastBsdfPdf, environmentPdf);
                 }
             }
-            pathSegment.color *= sampleEnvironment(environment, pathSegment.ray.direction, textures, texturePixels) * misWeight;
-            image[pathSegment.pixelIndex] += pathSegment.color;
+            glm::vec3 environmentContribution = pathSegment.color
+                * sampleEnvironment(environment, sceneTimeSeconds, pathSegment.ray.direction, textures, texturePixels)
+                * misWeight;
+            if (enableFireflyMitigation)
+            {
+                environmentContribution = clampLuminance(
+                    environmentContribution,
+                    computeEnvironmentContributionClamp(
+                        enableFireflyMitigation,
+                        maxNonDeltaSampleLuminance,
+                        maxPathThroughputLuminance));
+            }
+            image[pathSegment.pixelIndex] += environmentContribution;
             pathSegment.ignoreTriangleIndex = -1;
             pathSegment.remainingBounces = 0;
         }
@@ -2970,6 +3801,7 @@ void pathtrace(uchar4* pbo, int frame, int iter)
     const int pixelcount = cam.resolution.x * cam.resolution.y;
     const int sceneBvhNodeCount = static_cast<int>(hst_scene->sceneBvhNodes.size());
     const int triangleBvhNodeCount = static_cast<int>(hst_scene->triangleBvhNodes.size());
+    const int geomCount = static_cast<int>(hst_scene->geoms.size());
     const float sceneTimeSeconds = hst_scene->state.sceneTimeSeconds;
     const float frameDeltaTimeSeconds = hst_scene->state.frameDeltaTimeSeconds;
 
@@ -3115,6 +3947,7 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             dev_paths,
             dev_materials,
             dev_geoms,
+            geomCount,
             dev_meshInstances,
             dev_scenePrimitives,
             dev_sceneBvhNodes,
@@ -3124,6 +3957,7 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             triangleBvhNodeCount,
             dev_textures,
             dev_texturePixels,
+            dev_volumeSdfData,
             hst_scene->state.environment,
             dev_environmentTexelPmf,
             dev_environmentAliasProb,
@@ -3202,4 +4036,3 @@ void pathtrace(uchar4* pbo, int frame, int iter)
 
     checkCUDAError("pathtrace");
 }
-
