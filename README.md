@@ -111,15 +111,6 @@ The images below are not generic beauty renders; they document the renderer's te
   </tr>
 </table>
 
-## Animation Highlight
-
-The renderer now also includes a presentation-ready coastline animation:
-
-- [`debug_images/coastline.gif`](debug_images/coastline.gif): lightweight looping preview for GitHub README display
-- [`debug_images/coastline.mp4`](debug_images/coastline.mp4): animated shoreline sequence with moving water, rotating HDR environment lighting, and cloud motion
-
-For GitHub viewing, the animated GIF at the top of this README provides inline motion, while the linked MP4 preserves the higher-quality presentation version.
-
 ## Showcase Scenes
 
 - `scenes/cornell.json`: analytic Cornell box for baseline transport and material validation
@@ -186,19 +177,3 @@ The renderer progressively accumulates samples and saves the final image using t
 - `S`: save current render
 - `Space`: recenter camera target
 - `Esc`: save and exit
-
-## Suggested Next Renders For Presentation
-
-The current README already shows the technical progression well, but for a stronger PhD application package I would recommend rendering a few cleaner final images next:
-
-1. A high-sample `1920x1080` coastline hero render using the cloud-and-water setup.
-2. A four-frame contact sheet from the coastline animation at different time values.
-3. A close-up Mario/PBR shot that clearly shows texture detail, normal mapping, and glossy response.
-4. A smoke-volume comparison panel showing at least one sparse and one dense medium setting.
-5. A dedicated cloud scene rendered at sunrise or low-angle lighting to emphasize phase and depth.
-
-## Summary
-
-This project is a compact but complete GPU rendering system. It is not just a path tracer that produces a Cornell box; it is a renderer that handles imported assets, physically based shading, acceleration structures, volumes, animated water, lighting controls, and interactive scene editing in a single CUDA-based framework.
-
-That combination is exactly why it belongs in a research portfolio: it reflects the ability to design, implement, debug, and iterate on multiple interacting graphics systems at once.
