@@ -1,6 +1,6 @@
 # CUDA Path Tracer
 
-A research-oriented physically based renderer built in CUDA/C++ with an emphasis on end-to-end graphics systems work: scene loading, glTF asset ingestion, GPU acceleration structures, Monte Carlo light transport, physically based materials, participating media, animated water, and interactive tooling.
+A physically based renderer built in CUDA/C++ with an emphasis on end-to-end graphics systems work: scene loading, glTF asset ingestion, GPU acceleration structures, Monte Carlo light transport, physically based materials, participating media, animated water, and interactive tooling.
 
 This project began from a path tracing foundation and was extended into a compact rendering sandbox for studying how modern GPU renderers combine geometry processing, sampling strategies, material models, volumes, and artist-facing controls in one coherent system.
 
@@ -10,12 +10,7 @@ This project began from a path tracing foundation and was extended into a compac
   </a>
 </p>
 
-<p align="center">
-  <strong>Animation showcase:</strong>
-  <a href="debug_images/coastline.mp4">full-resolution MP4</a>
-</p>
-
-## Why This Project Matters
+## Introduction
 
 This renderer demonstrates full-stack graphics engineering rather than a single isolated technique. It includes:
 
@@ -27,7 +22,7 @@ This renderer demonstrates full-stack graphics engineering rather than a single 
 - animated Gerstner water with foam, shallow-water tinting, and absorption
 - an ImGui-based editing workflow for rapid iteration and debugging
 
-As a research portfolio piece, this project is meant to show both breadth and depth: physically based rendering, GPU systems implementation, numerical robustness, scene authoring, and iterative visual experimentation.
+This project is meant to show both breadth and depth: physically based rendering, GPU systems implementation, numerical robustness, scene authoring, and iterative visual experimentation.
 
 ## Core Capabilities
 
@@ -80,7 +75,7 @@ The images below are not generic beauty renders; they document the renderer's te
       <p><strong>Baseline diffuse Cornell box.</strong> Establishing camera, transport, and analytic geometry.</p>
     </td>
     <td width="50%">
-      <img src="debug_images/9cornell_fix_black_rim.png" alt="Cornell box with corrected glass refraction" width="100%">
+      <img src="debug_images/10cornell_cleanup_after9.png" alt="Cornell box with corrected glass refraction" width="100%">
       <p><strong>Refraction robustness pass.</strong> Fixing glass edge artifacts and improving physically plausible dielectric behavior.</p>
     </td>
   </tr>
@@ -90,14 +85,14 @@ The images below are not generic beauty renders; they document the renderer's te
       <p><strong>Mesh ingestion and BVH integration.</strong> Transition from analytic test scenes to imported glTF assets.</p>
     </td>
     <td width="50%">
-      <img src="debug_images/33texture_normal_map.png" alt="Mario scene with texture and normal mapping" width="100%">
+      <img src="debug_images/21mario_optimized_LTE.png" alt="Mario scene with texture and normal mapping" width="100%">
       <p><strong>Texturing and normal mapping.</strong> Bringing imported assets closer to modern physically based appearance.</p>
     </td>
   </tr>
   <tr>
     <td width="50%">
-      <img src="debug_images/34frosted_glass.png" alt="Frosted glass material study" width="100%">
-      <p><strong>Microfacet transmission study.</strong> Rough dielectric transport, glossy transmission, and firefly control.</p>
+      <img src="debug_images/27microfacet_rough0.2_metallic1.png" alt="Microfacet material study" width="100%">
+      <p><strong>Microfacet specular study.</strong> Rough specular transport, metallic and roughness control.</p>
     </td>
     <td width="50%">
       <img src="debug_images/37water_foam.png" alt="Animated water with foam" width="100%">
@@ -106,8 +101,8 @@ The images below are not generic beauty renders; they document the renderer's te
   </tr>
   <tr>
     <td width="50%">
-      <img src="debug_images/39smoke_bunny.png" alt="Bunny-shaped smoke volume" width="100%">
-      <p><strong>Participating media.</strong> Mesh-bounded smoke volume rendered inside the path tracer.</p>
+      <img src="debug_images/43smoke_cheap_multiple_scatter.png" alt="Bunny-shaped smoke volume" width="100%">
+      <p><strong>Participating media.</strong> Mesh-bounded smoke volume with multi-scattering.</p>
     </td>
     <td width="50%">
       <img src="debug_images/44add_cloud_environ.png" alt="Clouds added to coastline scene" width="100%">
