@@ -4,7 +4,16 @@ A research-oriented physically based renderer built in CUDA/C++ with an emphasis
 
 This project began from a path tracing foundation and was extended into a compact rendering sandbox for studying how modern GPU renderers combine geometry processing, sampling strategies, material models, volumes, and artist-facing controls in one coherent system.
 
-![](coastline.mp4)
+<p align="center">
+  <a href="coastline.mp4">
+    <img src="debug_images/44add_cloud_environ.png" alt="Click to open coastline animation" width="100%">
+  </a>
+</p>
+
+<p align="center">
+  <strong>Animation showcase:</strong>
+  <a href="coastline.mp4">coastline.mp4</a>
+</p>
 
 ## Why This Project Matters
 
@@ -106,6 +115,14 @@ The images below are not generic beauty renders; they document the renderer's te
     </td>
   </tr>
 </table>
+
+## Animation Highlight
+
+The renderer now also includes a presentation-ready coastline animation:
+
+- [`debug_images/coastline.mp4`](debug_images/coastline.mp4): animated shoreline sequence with moving water, rotating HDR environment lighting, and cloud motion
+
+For GitHub viewing, the static preview at the top of this README links directly to the video file.
 
 ## Showcase Scenes
 
